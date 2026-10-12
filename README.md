@@ -10,7 +10,7 @@ Chạy local thì tạo môi trường ảo trước
     pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
     pip install -r requirements.txt
 
-Chạy Colab
+Chạy Colab, Kaggle
     pip install -r requirements.txt
 
 Kiểm tra
