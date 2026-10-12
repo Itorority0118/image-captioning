@@ -1,0 +1,12 @@
+.venv/
+data/
+features/
+checkpoints/
+outputs/
+*.pt
+*.npy
+*.pth
+*.ckpt
+__pycache__/
+.ipynb_checkpoints/
+.env

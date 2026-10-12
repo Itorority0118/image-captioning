@@ -1,0 +1,7 @@
+transformers
+timm
+pycocoevalcap
+gradio
+huggingface_hub
+pyyaml
+nbstripout
