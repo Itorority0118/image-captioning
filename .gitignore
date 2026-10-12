@@ -1,8 +1,8 @@
 .venv/
-data/
-features/
-checkpoints/
-outputs/
+/data/
+/features/
+/checkpoints/
+/outputs/
 *.pt
 *.npy
 *.pth
