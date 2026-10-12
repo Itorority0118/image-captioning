@@ -8,17 +8,17 @@ def get_env():
         return "colab"
     return "local"
 
-env = get_env()
-if env == "kaggle":
-    data_path = Path("/kaggle/input/flickr30k")
-    work_path = Path("/kaggle/working")
-elif env == "colab":
-    data_path = Path("/content/data")
-    work_path = Path("/content/work")
+ENV = get_env()
+if ENV == "kaggle":
+    DATA_PATH = Path("/kaggle/input/flickr30k")
+    WORK_PATH = Path("/kaggle/working")
+elif ENV == "colab":
+    DATA_PATH = Path("/content/data")
+    WORK_PATH = Path("/content/work")
 else:
-    data_path = Path(os.getenv("data_path", "./data"))
-    work_path = Path(os.getenv("work_path", "./outputs"))
-feature_path = work_path / "features"
-checkpoint_path = work_path / "checkpoints"
+    DATA_PATH = Path(os.getenv("DATA_PATH", "./data"))
+    WORK_PATH = Path(os.getenv("WORK_PATH", "./outputs"))
+feature_path = WORK_PATH / "features"
+checkpoint_path = WORK_PATH / "checkpoints"
 for d in (feature_path, checkpoint_path):
     d.mkdir(parents=True, exist_ok=True)
