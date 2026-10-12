@@ -87,9 +87,62 @@ Khi code trên GitHub có cập nhật mới, mở lại notebook và chạy `!g
 
 Dataset Flickr30k **không nằm trong repo** (quá nặng).
 
-- Tải dataset tại: https://www.kaggle.com/datasets/hsankesara/flickr-image-dataset
-- Máy cá nhân: giải nén vào thư mục `data/` trong dự án.
-- Colab: đưa vào thư mục `/content/data`.
+- Tải dataset tại: https://www.kaggle.com/datasets/hsankesara/flickr-image-dataset (cần đăng nhập Kaggle)
+- **Máy cá nhân:** giải nén vào thư mục `data/` ở gốc dự án.
+- **Colab:** Colab mất dữ liệu mỗi khi đóng phiên, nên cách dễ nhất là upload file zip lên Google Drive một lần, rồi mỗi phiên chạy ô này (đổi tên file zip cho đúng):
+
+```
+from google.colab import drive
+drive.mount('/content/drive')
+!mkdir -p /content/data
+!unzip -q /content/drive/MyDrive/flickr30k.zip -d /content/data
+```
+
+---
+
+## C2. Cấu trúc thư mục
+
+```
+image-captioning/
+├── src/                    Code chính của dự án
+│   ├── paths.py            Tự nhận biết đang chạy local hay Colab, chọn thư mục phù hợp
+│   ├── train.py            Chạy huấn luyện mô hình
+│   ├── data/               Xử lý dữ liệu (ảnh, caption, Dataset)
+│   ├── models/             Định nghĩa mô hình (EfficientNet-B0 + GPT-2)
+│   ├── decoding/           Thuật toán sinh câu (Greedy Search, Beam Search)
+│   └── eval/               Tính điểm BLEU, ROUGE, METEOR, CIDEr, SPICE
+├── app/                    Web demo (Gradio)
+├── notebooks/              Notebook chạy trên Colab
+├── configs/
+│   └── base.yaml           Cấu hình huấn luyện (learning rate, batch size, ...)
+├── tests/                  Code kiểm tra tự động
+├── requirements.txt        Danh sách thư viện cần cài
+├── .gitignore              Danh sách file/thư mục không đưa lên GitHub
+└── README.md               File hướng dẫn này
+```
+
+Các thư mục dưới đây **không nằm trên GitHub** (vì quá nặng):
+
+| Thư mục | Nội dung | Cách có được |
+|---|---|---|
+| `data/` | Ảnh và caption gốc của Flickr30k | Tự tải về và bỏ vào (xem mục C) |
+| `outputs/features/` | Đặc trưng ảnh đã trích xuất (file `.npy`) | Tự tạo khi chạy code |
+| `outputs/checkpoints/` | Mô hình đã huấn luyện (file `.pt`) | Tự tạo khi chạy code |
+
+Trên Colab, hai thư mục kết quả nằm ở `/content/work/features` và `/content/work/checkpoints`.
+
+Lưu ý: `data/` ở gốc dự án (chứa dataset) khác với `src/data/` (chứa code xử lý dữ liệu).
+
+### Ai phụ trách thư mục nào
+
+| Thành viên | Thư mục / file phụ trách |
+|---|---|
+| Thành viên 1 (ảnh + feature) | `src/data/image_features.py`, `src/data/split.py` |
+| Thành viên 2 (văn bản + Dataset) | `src/data/text_preprocess.py`, `src/data/dataset.py` |
+| Thành viên 3 (mô hình + huấn luyện) | `src/models/`, `src/decoding/`, `src/train.py`, `configs/` |
+| Thành viên 4 (đánh giá + web) | `src/eval/`, `app/`, `notebooks/` |
+
+Quy tắc: **chỉ sửa file thuộc phần mình phụ trách**. Cần sửa file của người khác thì nhắn họ.
 
 ---
 
@@ -99,6 +152,7 @@ Quy tắc chung (dùng cách nào cũng phải theo):
 
 - Không commit thẳng vào nhánh `main`.
 - Viết xong thì mở Pull Request, chờ duyệt rồi mới merge.
+- Không đưa mật khẩu, token hay API key vào code (repo này công khai).
 
 ### Cách 1: dùng GitHub Desktop
 
