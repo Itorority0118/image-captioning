@@ -1,7 +1,16 @@
-# Image Captioning: EfficientNet-B0 + GPT-2
+# Image Captioning: so sánh 4 mô hình sinh chú thích ảnh
 
-Dự án tạo câu mô tả cho ảnh.
-Dataset: Flickr30k. Encoder: EfficientNet-B0. Decoder: GPT-2.
+Bài toán: tự động sinh chú thích tiếng Anh cho ảnh.
+Dataset: Flickr30k.
+
+4 mô hình được so sánh:
+
+| Tên mô hình | Encoder (đọc ảnh) | Decoder (viết câu) |
+|---|---|---|
+| `mobilenetv3_lstm` | MobileNetV3-Large | LSTM + Attention |
+| `efficientnet_b0_gpt2` | EfficientNet-B0 | GPT-2 |
+| `deit_tiny_gpt2` | DeiT-Tiny | GPT-2 |
+| `tinyclip_gpt2` | TinyCLIP | GPT-2 |
 
 ---
 
@@ -98,27 +107,48 @@ drive.mount('/content/drive')
 !unzip -q /content/drive/MyDrive/flickr30k.zip -d /content/data
 ```
 
+### Lưu feature và checkpoint lên Google Drive (Colab)
+
+Feature ảnh và mô hình đã train **mất khi đóng phiên Colab**, nên sau khi tạo xong phải chép lên Drive chung của nhóm (đã mount Drive như trên):
+
+```
+!mkdir -p /content/drive/MyDrive/captioning
+!cp -r /content/work/features /content/drive/MyDrive/captioning/
+!cp -r /content/work/checkpoints /content/drive/MyDrive/captioning/
+```
+
+Phiên mới muốn dùng lại:
+
+```
+!mkdir -p /content/work
+!cp -r /content/drive/MyDrive/captioning/features /content/work/
+!cp -r /content/drive/MyDrive/captioning/checkpoints /content/work/
+```
+
 ---
 
 ## C2. Cấu trúc thư mục
 
 ```
 image-captioning/
-├── src/                    Code chính của dự án
-│   ├── paths.py            Tự nhận biết đang chạy local hay Colab, chọn thư mục phù hợp
-│   ├── train.py            Chạy huấn luyện mô hình
-│   ├── data/               Xử lý dữ liệu (ảnh, caption, Dataset)
-│   ├── models/             Định nghĩa mô hình (EfficientNet-B0 + GPT-2)
-│   ├── decoding/           Thuật toán sinh câu (Greedy Search, Beam Search)
-│   └── eval/               Tính điểm BLEU, ROUGE, METEOR, CIDEr, SPICE
-├── app/                    Web demo (Gradio)
-├── notebooks/              Notebook chạy trên Colab
+├── src/                      Code chính của dự án
+│   ├── paths.py              Tự nhận biết đang chạy local hay Colab, chọn thư mục phù hợp
+│   ├── train.py              Chạy huấn luyện (chọn encoder và decoder)
+│   ├── data/                 Xử lý dữ liệu (ảnh, caption, Dataset)
+│   ├── models/
+│   │   ├── encoders.py       4 encoder (MobileNetV3, EfficientNet-B0, DeiT-Tiny, TinyCLIP)
+│   │   ├── decoder_lstm.py   Decoder LSTM + Attention
+│   │   └── decoder_gpt2.py   Decoder GPT-2
+│   ├── decoding/             Thuật toán sinh câu (Greedy Search, Beam Search)
+│   └── eval/                 Tính điểm BLEU, ROUGE, METEOR, CIDEr, SPICE
+├── app/                      Web demo (Gradio)
+├── notebooks/                Notebook chạy trên Colab
 ├── configs/
-│   └── base.yaml           Cấu hình huấn luyện (learning rate, batch size, ...)
-├── tests/                  Code kiểm tra tự động
-├── requirements.txt        Danh sách thư viện cần cài
-├── .gitignore              Danh sách file/thư mục không đưa lên GitHub
-└── README.md               File hướng dẫn này
+│   └── base.yaml             Cấu hình huấn luyện (learning rate, batch size, ...)
+├── tests/                    Code kiểm tra tự động
+├── requirements.txt          Danh sách thư viện cần cài
+├── .gitignore                Danh sách file/thư mục không đưa lên GitHub
+└── README.md                 File hướng dẫn này
 ```
 
 Các thư mục dưới đây **không nằm trên GitHub** (vì quá nặng):
@@ -126,23 +156,47 @@ Các thư mục dưới đây **không nằm trên GitHub** (vì quá nặng):
 | Thư mục | Nội dung | Cách có được |
 |---|---|---|
 | `data/` | Ảnh và caption gốc của Flickr30k | Tự tải về và bỏ vào (xem mục C) |
-| `outputs/features/` | Đặc trưng ảnh đã trích xuất (file `.npy`) | Tự tạo khi chạy code |
-| `outputs/checkpoints/` | Mô hình đã huấn luyện (file `.pt`) | Tự tạo khi chạy code |
+| `outputs/features/<encoder>/` | Feature ảnh (file `.npy`), mỗi encoder một thư mục | Tự tạo khi chạy code |
+| `outputs/checkpoints/<encoder>_<decoder>/` | Mô hình đã train, mỗi mô hình một thư mục | Tự tạo khi chạy code |
 
 Trên Colab, hai thư mục kết quả nằm ở `/content/work/features` và `/content/work/checkpoints`.
 
 Lưu ý: `data/` ở gốc dự án (chứa dataset) khác với `src/data/` (chứa code xử lý dữ liệu).
 
+### Tên chuẩn dùng trong toàn dự án
+
+Viết đúng y như bảng này (trong code, tên thư mục, dòng lệnh):
+
+| Encoder | Decoder |
+|---|---|
+| `mobilenetv3` | `lstm` |
+| `efficientnet_b0` | `gpt2` |
+| `deit_tiny` | |
+| `tinyclip` | |
+
+Ví dụ: thư mục feature `outputs/features/deit_tiny/`, thư mục checkpoint `outputs/checkpoints/deit_tiny_gpt2/`.
+
+### Hình dạng feature của từng encoder (mỗi ảnh)
+
+| Encoder | Shape | Dung lượng 31.783 ảnh (float16) |
+|---|---|---|
+| `mobilenetv3` | 49 x 960 | khoảng 3,0 GB |
+| `efficientnet_b0` | 49 x 1280 | khoảng 4,0 GB |
+| `deit_tiny` | 197 x 192 | khoảng 2,4 GB |
+| `tinyclip` | 1 x 512 | khoảng 32 MB |
+
+Decoder **không được ghi cứng số vị trí** (49, 197, 1): phải đọc từ shape của feature.
+
 ### Ai phụ trách thư mục nào
 
-| Thành viên | Thư mục / file phụ trách |
-|---|---|
-| Thành viên 1 (ảnh + feature) | `src/data/image_features.py`, `src/data/split.py` |
-| Thành viên 2 (văn bản + Dataset) | `src/data/text_preprocess.py`, `src/data/dataset.py` |
-| Thành viên 3 (mô hình + huấn luyện) | `src/models/`, `src/decoding/`, `src/train.py`, `configs/` |
-| Thành viên 4 (đánh giá + web) | `src/eval/`, `app/`, `notebooks/` |
+| Thành viên | File phụ trách | Mô hình tự huấn luyện |
+|---|---|---|
+| Thành viên 1 | `src/data/image_features.py`, `src/data/split.py`, `src/models/encoders.py` | `tinyclip_gpt2` |
+| Thành viên 2 | `src/data/text_preprocess.py`, `src/data/dataset.py`, `src/models/decoder_lstm.py` | `mobilenetv3_lstm` |
+| Thành viên 3 | `src/models/decoder_gpt2.py`, `src/decoding/`, `src/train.py`, `configs/` | `efficientnet_b0_gpt2` |
+| Thành viên 4 | `src/eval/`, `app/`, `notebooks/` | `deit_tiny_gpt2` |
 
-Quy tắc: **chỉ sửa file thuộc phần mình phụ trách**. Cần sửa file của người khác thì nhắn họ.
+Quy tắc: **chỉ sửa file thuộc phần mình phụ trách**. Cần sửa file của người khác thì nhắn người đó.
 
 ---
 
