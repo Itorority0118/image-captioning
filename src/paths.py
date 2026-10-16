@@ -16,9 +16,23 @@ elif ENV == "colab":
     DATA_PATH = Path("/content/data")
     WORK_PATH = Path("/content/work")
 else:
-    DATA_PATH = Path(os.getenv("DATA_PATH", "./data"))
-    WORK_PATH = Path(os.getenv("WORK_PATH", "./outputs"))
+    DATA_PATH = Path("./data")
+    WORK_PATH = Path("./outputs")
+
 feature_path = WORK_PATH / "features"
 checkpoint_path = WORK_PATH / "checkpoints"
+
 for d in (feature_path, checkpoint_path):
     d.mkdir(parents=True, exist_ok=True)
+
+
+def get_feature_path(encoder_name):
+    folder = feature_path / encoder_name
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def get_checkpoint_path(encoder_name, decoder_name):
+    folder = checkpoint_path / (encoder_name + "_" + decoder_name)
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
