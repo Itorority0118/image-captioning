@@ -109,7 +109,7 @@ drive.mount('/content/drive')
 
 ### Lưu feature và checkpoint lên Google Drive (Colab)
 
-Feature ảnh và mô hình đã train **mất khi đóng phiên Colab**, nên sau khi tạo xong phải chép lên Drive chung của nhóm (đã mount Drive như trên):
+Feature ảnh và mô hình đã train **mất khi đóng phiên Colab**, nên sau khi tạo xong phải chép sang Google Drive **của chính mình** (đã mount Drive như trên). Mỗi người chỉ lưu feature và checkpoint của mô hình mình phụ trách
 
 ```
 !mkdir -p /content/drive/MyDrive/captioning
@@ -126,6 +126,19 @@ Phiên mới muốn dùng lại:
 ```
 
 ---
+### Bộ ảnh nhỏ để test code trên máy cá nhân
+
+Không cần giữ cả dataset trên máy. Chỉ cần vài trăm ảnh để chạy thử code:
+
+1. Tải dataset đầy đủ về máy một lần (link ở trên) và giải nén ra một thư mục tạm.
+2. Mở `src/data/make_sample.py`, sửa 3 dòng đầu (`CSV_PATH`, `IMAGE_DIR`, `NUM_IMAGES`) cho đúng đường dẫn trên máy
+3. Chạy lệnh:
+
+```
+python src/data/make_sample.py
+```
+
+Script lấy ngẫu nhiên 300 ảnh (seed 42, nên cả nhóm ra cùng một bộ) và chép vào thư mục `data/`.
 
 ## C2. Cấu trúc thư mục
 
@@ -135,16 +148,20 @@ image-captioning/
 │   ├── paths.py              Tự nhận biết đang chạy local hay Colab, chọn thư mục phù hợp
 │   ├── train.py              Chạy huấn luyện (chọn encoder và decoder)
 │   ├── data/                 Xử lý dữ liệu (ảnh, caption, Dataset)
+│   │   └── make_sample.py    Tạo bộ ảnh nhỏ (vài trăm ảnh) để test code trên máy cá nhân
 │   ├── models/
 │   │   ├── encoders.py       4 encoder (MobileNetV3, EfficientNet-B0, DeiT-Tiny, TinyCLIP)
 │   │   ├── decoder_lstm.py   Decoder LSTM + Attention
 │   │   └── decoder_gpt2.py   Decoder GPT-2
-│   ├── decoding/             Thuật toán sinh câu (Greedy Search, Beam Search)
+│   ├── decoding/
+│   │   ├── greedy.py         Greedy Search
+│   │   └── beam.py           Beam Search
 │   └── eval/                 Tính điểm BLEU, ROUGE, METEOR, CIDEr, SPICE
 ├── app/                      Web demo (Gradio)
 ├── notebooks/                Notebook chạy trên Colab
 ├── configs/
-│   └── base.yaml             Cấu hình huấn luyện (learning rate, batch size, ...)
+│   ├── base.yaml             Cấu hình huấn luyện (learning rate, batch size, ...)
+│   └── splits.json           Danh sách ảnh train/val/test (cả nhóm dùng chung)
 ├── tests/                    Code kiểm tra tự động
 ├── requirements.txt          Danh sách thư viện cần cài
 ├── .gitignore                Danh sách file/thư mục không đưa lên GitHub
@@ -191,10 +208,10 @@ Decoder **không được ghi cứng số vị trí** (49, 197, 1): phải đọ
 
 | Thành viên | File phụ trách | Mô hình tự huấn luyện |
 |---|---|---|
-| Thành viên 1 | `src/data/image_features.py`, `src/data/split.py`, `src/models/encoders.py` | `tinyclip_gpt2` |
-| Thành viên 2 | `src/data/text_preprocess.py`, `src/data/dataset.py`, `src/models/decoder_lstm.py` | `mobilenetv3_lstm` |
-| Thành viên 3 | `src/models/decoder_gpt2.py`, `src/decoding/`, `src/train.py`, `configs/` | `efficientnet_b0_gpt2` |
-| Thành viên 4 | `src/eval/`, `app/`, `notebooks/` | `deit_tiny_gpt2` |
+| Thành viên 1 | `src/data/split.py`, `src/data/image_features.py`, `src/models/encoders.py`, `app/` | `tinyclip_gpt2` |
+| Thành viên 2 | `src/data/text_preprocess.py`, `src/data/dataset.py`, `src/models/decoder_lstm.py`, `tests/` | `mobilenetv3_lstm` |
+| Thành viên 3 | `src/models/decoder_gpt2.py`, `src/decoding/greedy.py`, `src/train.py`, `configs/` | `efficientnet_b0_gpt2` |
+| Thành viên 4 | `src/eval/`, `src/decoding/beam.py`, `notebooks/` | `deit_tiny_gpt2` |
 
 Quy tắc: **chỉ sửa file thuộc phần mình phụ trách**. Cần sửa file của người khác thì nhắn người đó.
 
