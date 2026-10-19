@@ -1,10 +1,11 @@
 import os
 import sys
 import time
+import matplotlib.pyplot as plt
 from PIL import Image
 
 IMAGE_DIR = os.path.join("data", "flickr30k_images")
-CSV_PATH = os.path.join("data", "results_sample.csv")
+CSV_PATH = os.path.join("data", "results.csv")
 REPORT_PATH = os.path.join("outputs", "image_report.txt")
 
 if len(sys.argv) >= 2:
@@ -118,4 +119,35 @@ f = open(REPORT_PATH, "w", encoding="utf-8")
 for line in lines:
     f.write(line + "\n")
 f.close()
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+axes[0].hist(widths, bins=30)
+axes[0].set_title("Phân bố chiều rộng ảnh")
+axes[0].set_xlabel("Chiều rộng (px)")
+axes[0].set_ylabel("Số ảnh")
+axes[1].hist(heights, bins=30)
+axes[1].set_title("Phân bố chiều cao ảnh")
+axes[1].set_xlabel("Chiều cao (px)")
+axes[1].set_ylabel("Số ảnh")
+plt.tight_layout()
+plt.savefig(os.path.join("outputs", "size_hist.png"), dpi=150)
+plt.close()
+
+labels = []
+values = []
+top = 0
+for p in pairs:
+    if top >= 5:
+        break
+    labels.append(p[1])
+    values.append(p[0])
+    top = top + 1
+plt.figure(figsize=(7, 4))
+plt.bar(labels, values)
+plt.title("5 kích thước ảnh phổ biến nhất")
+plt.xlabel("Kích thước")
+plt.ylabel("Số ảnh")
+plt.savefig(os.path.join("outputs", "top_sizes.png"), dpi=150)
+plt.close()
+
 print("Đã lưu báo cáo:", REPORT_PATH)
