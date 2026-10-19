@@ -1,9 +1,10 @@
 import os
 import sys
+import time
 from PIL import Image
 
 IMAGE_DIR = os.path.join("data", "flickr30k_images")
-CSV_PATH = os.path.join("data", "results.csv")
+CSV_PATH = os.path.join("data", "results_sample.csv")
 REPORT_PATH = os.path.join("outputs", "image_report.txt")
 
 if len(sys.argv) >= 2:
@@ -38,7 +39,17 @@ size_count = {}
 bad_files = []
 not_rgb = 0
 
+step = len(files) // 20
+if step < 1:
+    step = 1
+start_time = time.time()
+done = 0
+
 for name in files:
+    done = done + 1
+    if done % step == 0 or done == len(files):
+        used = round(time.time() - start_time)
+        print("Đã xử lý", done, "/", len(files), "ảnh, đã chạy", used, "giây", flush=True)
     path = os.path.join(IMAGE_DIR, name)
     try:
         img = Image.open(path)
