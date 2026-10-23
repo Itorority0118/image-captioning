@@ -4,7 +4,7 @@ import random
 import sys
 
 SEED = 42
-NUM_CAPTIONS = 5          
+NUM_CAPTIONS = 1  
 FULL_VAL = 1000       
 FULL_TEST = 1000   
 SAMPLE_VAL_RATIO = 0.1  
