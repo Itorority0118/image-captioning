@@ -7,7 +7,7 @@ Dataset: Flickr30k.
 
 | Tên mô hình | Encoder (đọc ảnh) | Decoder (viết câu) |
 |---|---|---|
-| `mobilenetv3_lstm` | MobileNetV3-Large | LSTM + Attention |
+| `mobilenetv3_lstm` | MobileNetV3-Small | LSTM + Attention |
 | `efficientnet_b0_gpt2` | EfficientNet-B0 | GPT-2 |
 | `deit_tiny_gpt2` | DeiT-Tiny | GPT-2 |
 | `tinyclip_gpt2` | TinyCLIP | GPT-2 |
@@ -98,13 +98,31 @@ Dataset Flickr30k **không nằm trong repo** (quá nặng).
 
 - Tải dataset tại: https://www.kaggle.com/datasets/hsankesara/flickr-image-dataset (cần đăng nhập Kaggle)
 - **Máy cá nhân:** giải nén vào thư mục `data/` ở gốc dự án.
-- **Colab:** Colab mất dữ liệu mỗi khi đóng phiên, nên cách dễ nhất là upload file zip lên Google Drive một lần, rồi mỗi phiên chạy ô này (đổi tên file zip cho đúng):
+- **Colab:** nên dùng một file zip duy nhất rồi giải nén vào ổ đĩa Colab. Mỗi phiên mới chạy ô này:
 
 ```
 from google.colab import drive
 drive.mount('/content/drive')
+!cp /content/drive/MyDrive/captioning/flickr30k_clean.zip /content/
 !mkdir -p /content/data
-!unzip -q /content/drive/MyDrive/flickr30k.zip -d /content/data
+!unzip -q /content/flickr30k_clean.zip -d /content/data
+!rm /content/flickr30k_clean.zip
+```
+
+Sau đó ảnh nằm ở `/content/data/flickr30k_images` và caption ở `/content/data/results.csv`.
+
+```
+!pip install -q kagglehub
+import kagglehub
+path = kagglehub.dataset_download("hsankesara/flickr-image-dataset")
+!cd "{path}/flickr30k_images" && zip -r -0 -q /content/flickr30k_clean.zip results.csv flickr30k_images -x "flickr30k_images/flickr30k_images/*" -x "flickr30k_images/results.csv"
+from google.colab import drive
+drive.mount('/content/drive')
+!mkdir -p /content/drive/MyDrive/captioning
+!cp /content/flickr30k_clean.zip /content/drive/MyDrive/captioning/
+```
+
+(Bộ dữ liệu trên Kaggle bị đóng gói hai bản ảnh, lệnh trên chỉ nén một bản nên file chỉ khoảng 4,2 GB.)
 ```
 
 ### Lưu feature và checkpoint lên Google Drive (Colab)
@@ -148,7 +166,10 @@ image-captioning/
 │   ├── paths.py              Tự nhận biết đang chạy local hay Colab, chọn thư mục phù hợp
 │   ├── train.py              Chạy huấn luyện (chọn encoder và decoder)
 │   ├── data/                 Xử lý dữ liệu (ảnh, caption, Dataset)
-│   │   └── make_sample.py    Tạo bộ ảnh nhỏ (vài trăm ảnh) để test code trên máy cá nhân
+│   │   ├── make_sample.py    Tạo bộ ảnh nhỏ (vài trăm ảnh) để test code trên máy cá nhân
+│   │   ├── split.py          Chia train/val/test theo tên ảnh
+│   │   ├── explore_images.py Khám phá ảnh: kích thước, ảnh lỗi, so khớp với caption
+│   │   └── image_features.py Trích feature ảnh bằng 4 encoder
 │   ├── models/
 │   │   ├── encoders.py       4 encoder (MobileNetV3, EfficientNet-B0, DeiT-Tiny, TinyCLIP)
 │   │   ├── decoder_lstm.py   Decoder LSTM + Attention
@@ -161,12 +182,29 @@ image-captioning/
 ├── notebooks/                Notebook chạy trên Colab
 ├── configs/
 │   ├── base.yaml             Cấu hình huấn luyện (learning rate, batch size, ...)
-│   └── splits.json           Danh sách ảnh train/val/test (cả nhóm dùng chung)
+│   ├── splits.json           Danh sách ảnh train/val/test (cả nhóm dùng chung)
+│   └── splits_sample.json    Bản chia cho bộ ảnh nhỏ (dùng để test trên máy)
 ├── tests/                    Code kiểm tra tự động
 ├── requirements.txt          Danh sách thư viện cần cài
 ├── .gitignore                Danh sách file/thư mục không đưa lên GitHub
 └── README.md                 File hướng dẫn này
 ```
+
+## C3. Chạy tiền xử lý ảnh
+
+`configs/splits.json` đã có sẵn trong repo (31.783 ảnh: 30.783 train, 1.000 val, 1.000 test, chia theo tên ảnh, seed 42), không cần chạy lại.
+
+Trích feature (từ thư mục gốc dự án, nhớ có `-m` và không có `.py`):
+
+```
+# Thử nhanh trên bộ ảnh nhỏ ở máy cá nhân
+python -m src.data.image_features --encoder deit_tiny --splits configs/splits_sample.json
+
+# Chạy toàn bộ trên Colab (ảnh đã giải nén ở /content/data)
+!python -m src.data.image_features --encoder deit_tiny --image_dir /content/data/flickr30k_images
+```
+
+`--encoder` chọn một trong: `mobilenetv3`, `efficientnet_b0`, `deit_tiny`, `tinyclip`. Ảnh nào đã có file feature thì được bỏ qua, nên Colab bị ngắt thì chạy lại đúng lệnh cũ là làm tiếp.
 
 Các thư mục dưới đây **không nằm trên GitHub** (vì quá nặng):
 
@@ -197,12 +235,13 @@ Ví dụ: thư mục feature `outputs/features/deit_tiny/`, thư mục checkpoin
 
 | Encoder | Shape | Dung lượng 31.783 ảnh (float16) |
 |---|---|---|
-| `mobilenetv3` | 49 x 960 | khoảng 3,0 GB |
+| `mobilenetv3` | 49 x 576 | khoảng 1,8 GB |
 | `efficientnet_b0` | 49 x 1280 | khoảng 4,0 GB |
 | `deit_tiny` | 197 x 192 | khoảng 2,4 GB |
-| `tinyclip` | 1 x 512 | khoảng 32 MB |
+| `tinyclip` | 50 x 512 | khoảng 1,6 GB |
 
-Decoder **không được ghi cứng số vị trí** (49, 197, 1): phải đọc từ shape của feature.
+Với `tinyclip`, 50 vị trí gồm 1 vector chung và 49 mảnh ảnh (lấy `last_hidden_state`).
+Decoder **không được ghi cứng số vị trí** (49, 197, 50): phải đọc từ shape của feature.
 
 ### Ai phụ trách thư mục nào
 
