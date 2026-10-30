@@ -14,7 +14,7 @@ class Flickr30kDataset(Dataset):
     Dataset Flickr30k cho Image Captioning.
 
     Mỗi phần tử gồm:
-        image_features: Tensor (49, 576)
+        image_features: Tensor (num_patches, feature_dim)
         caption_ids:    Tensor (max_len,)
     """
 
@@ -131,10 +131,9 @@ class Flickr30kDataset(Dataset):
 
         array = np.load(feature_path)
 
-        if array.shape != (49, 576):
+        if array.ndim != 2:
             raise ValueError(
-                f"Feature {image_name} có shape {array.shape}, "
-                "mong đợi (49, 576)"
+                f"Feature {image_name} có ndim {array.ndim}, mong đợi ma trận 2D"
             )
 
         if not np.isfinite(array).all():
