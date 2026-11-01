@@ -1,21 +1,30 @@
+
 import json
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from src.data.text_preprocess import encode_caption, load_captions
+from src.data.text_preprocess import (
+    MAX_LEN,
+    create_sequence_pair,
+    encode_caption,
+    load_captions,
+    load_gpt2_tokenizer,
+)
 
 
 class Flickr30kDataset(Dataset):
     """
     Dataset Flickr30k cho Image Captioning.
 
-    Mỗi phần tử gồm:
-        image_features: Tensor (num_patches, feature_dim)
-        caption_ids:    Tensor (max_len,)
+    Mỗi phần tử trả về:
+        image_features:    Tensor (49, 576)
+        decoder_input_ids: Tensor (max_len - 1,)
+        target_ids:        Tensor (max_len - 1,)
+        attention_mask:    Tensor (max_len - 1,)
+        loss_mask:         Tensor (max_len - 1,)
     """
 
     def __init__(
@@ -24,9 +33,7 @@ class Flickr30kDataset(Dataset):
         split_path,
         feature_dir,
         split="train",
-        vocab=None,
-        max_len=40,
-        min_freq=2,
+        max_len=MAX_LEN,
     ):
         super().__init__()
 
@@ -35,28 +42,27 @@ class Flickr30kDataset(Dataset):
                 "split phải là 'train', 'val' hoặc 'test'"
             )
 
+        if max_len < 2:
+            raise ValueError("max_len phải >= 2")
+
         self.csv_path = Path(csv_path)
         self.split_path = Path(split_path)
         self.feature_dir = Path(feature_dir)
         self.split = split
         self.max_len = max_len
 
-        if not self.csv_path.exists():
-            raise FileNotFoundError(
-                f"Không tìm thấy CSV: {self.csv_path}"
-            )
+        # Kiểm tra đường dẫn.
+        for path, name in [
+            (self.csv_path, "CSV"),
+            (self.split_path, "split"),
+            (self.feature_dir, "feature"),
+        ]:
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"Không tìm thấy {name}: {path}"
+                )
 
-        if not self.split_path.exists():
-            raise FileNotFoundError(
-                f"Không tìm thấy split: {self.split_path}"
-            )
-
-        if not self.feature_dir.exists():
-            raise FileNotFoundError(
-                f"Không tìm thấy feature: {self.feature_dir}"
-            )
-
-        # Đọc danh sách ảnh train, validation và test.
+        # Đọc danh sách ảnh của split.
         with open(self.split_path, "r", encoding="utf-8") as f:
             splits = json.load(f)
 
@@ -67,54 +73,48 @@ class Flickr30kDataset(Dataset):
 
         self.image_names = set(splits[split])
 
-        # Đọc caption Flickr30k.
+        if not self.image_names:
+            raise ValueError(
+                f"Split '{split}' không có ảnh"
+            )
+
+        # Đọc và tiền xử lý caption.
         df = load_captions(self.csv_path)
 
-        # Chỉ giữ caption thuộc tập ảnh hiện tại
-        df = df[df["image_name"].isin(self.image_names)].copy()
+        df = df[
+            df["image_name"].isin(self.image_names)
+        ].copy()
 
-        # Loại caption rỗng và bản ghi trùng trong cùng một ảnh
-        df = df[df["comment"].str.strip() != ""].copy()
+        df = df[
+            df["comment"].str.strip() != ""
+        ].copy()
 
         df = df.drop_duplicates(
             subset=["image_name", "comment"],
-            keep="first"
+            keep="first",
         ).reset_index(drop=True)
 
         if df.empty:
             raise ValueError(
-                f"Không có caption nào thuộc tập {split}"
+                f"Không có caption thuộc split '{split}'"
             )
 
-        # Mỗi ảnh có thể có nhiều caption.
+        # Mỗi record tương ứng một caption của một ảnh.
         self.records = list(
             df[["image_name", "comment"]]
             .itertuples(index=False, name=None)
         )
 
-        # Chỉ xây dựng vocabulary từ caption của train.
-        if vocab is None:
-            if split != "train":
-                raise ValueError(
-                    "Val/test phải dùng vocabulary được tạo từ train."
-                )
+        # Sử dụng chung GPT-2 BPE tokenizer.
+        self.tokenizer = load_gpt2_tokenizer()
 
-            from src.data.text_preprocess import build_vocab
-
-            self.vocab = build_vocab(
-                df["comment"].tolist(),
-                min_freq=min_freq,
-            )
-        else:
-            self.vocab = vocab
-
+        # Cache feature gần nhất.
         self._feature_cache = {}
 
     def __len__(self):
         return len(self.records)
 
     def _load_feature(self, image_name):
-        # Giữ cache một feature gần nhất để giảm đọc file lặp lại.
         if image_name in self._feature_cache:
             return self._feature_cache[image_name]
 
@@ -133,7 +133,14 @@ class Flickr30kDataset(Dataset):
 
         if array.ndim != 2:
             raise ValueError(
-                f"Feature {image_name} có ndim {array.ndim}, mong đợi ma trận 2D"
+                f"Feature {image_name} phải là ma trận 2D, "
+                f"nhận được shape {array.shape}"
+            )
+
+        if array.shape != (49, 576):
+            raise ValueError(
+                f"Feature {image_name} có shape {array.shape}, "
+                "mong đợi (49, 576)"
             )
 
         if not np.isfinite(array).all():
@@ -141,7 +148,6 @@ class Flickr30kDataset(Dataset):
                 f"Feature {image_name} chứa NaN hoặc Inf"
             )
 
-        # Chuyển float16 sang float32 cho quá trình huấn luyện.
         feature = torch.from_numpy(
             array.astype(np.float32)
         )
@@ -154,17 +160,35 @@ class Flickr30kDataset(Dataset):
     def __getitem__(self, index):
         image_name, caption = self.records[index]
 
+        # Load đặc trưng ảnh.
         image_features = self._load_feature(image_name)
 
-        caption_ids = encode_caption(
+        # GPT-2 BPE encoding.
+        encoded = encode_caption(
             caption,
-            self.vocab,
+            tokenizer=self.tokenizer,
             max_len=self.max_len,
         )
 
-        caption_ids = torch.tensor(
-            caption_ids,
-            dtype=torch.long,
-        )
+        # Tạo cặp input và target cho Teacher Forcing.
+        sequence = create_sequence_pair(encoded)
 
-        return image_features, caption_ids
+        return {
+            "image_features": image_features,
+            "decoder_input_ids": torch.tensor(
+                sequence["decoder_input_ids"],
+                dtype=torch.long,
+            ),
+            "target_ids": torch.tensor(
+                sequence["target_ids"],
+                dtype=torch.long,
+            ),
+            "attention_mask": torch.tensor(
+                encoded["attention_mask"][:-1],
+                dtype=torch.long,
+            ),
+            "loss_mask": torch.tensor(
+                sequence["loss_mask"],
+                dtype=torch.long,
+            ),
+        }
