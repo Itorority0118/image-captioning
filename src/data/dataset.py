@@ -51,7 +51,6 @@ class Flickr30kDataset(Dataset):
         self.split = split
         self.max_len = max_len
 
-        # Kiểm tra đường dẫn.
         for path, name in [
             (self.csv_path, "CSV"),
             (self.split_path, "split"),
@@ -62,7 +61,6 @@ class Flickr30kDataset(Dataset):
                     f"Không tìm thấy {name}: {path}"
                 )
 
-        # Đọc danh sách ảnh của split.
         with open(self.split_path, "r", encoding="utf-8") as f:
             splits = json.load(f)
 
@@ -78,7 +76,6 @@ class Flickr30kDataset(Dataset):
                 f"Split '{split}' không có ảnh"
             )
 
-        # Đọc và tiền xử lý caption.
         df = load_captions(self.csv_path)
 
         df = df[
@@ -99,16 +96,13 @@ class Flickr30kDataset(Dataset):
                 f"Không có caption thuộc split '{split}'"
             )
 
-        # Mỗi record tương ứng một caption của một ảnh.
         self.records = list(
             df[["image_name", "comment"]]
             .itertuples(index=False, name=None)
         )
 
-        # Sử dụng chung GPT-2 BPE tokenizer.
         self.tokenizer = load_gpt2_tokenizer()
 
-        # Cache feature gần nhất.
         self._feature_cache = {}
 
     def __len__(self):
@@ -160,17 +154,14 @@ class Flickr30kDataset(Dataset):
     def __getitem__(self, index):
         image_name, caption = self.records[index]
 
-        # Load đặc trưng ảnh.
         image_features = self._load_feature(image_name)
 
-        # GPT-2 BPE encoding.
         encoded = encode_caption(
             caption,
             tokenizer=self.tokenizer,
             max_len=self.max_len,
         )
 
-        # Tạo cặp input và target cho Teacher Forcing.
         sequence = create_sequence_pair(encoded)
 
         return {
