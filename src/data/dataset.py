@@ -20,11 +20,14 @@ class Flickr30kDataset(Dataset):
     Dataset Flickr30k cho Image Captioning.
 
     Mỗi phần tử trả về:
-        image_features:    Tensor (49, 576)
+        image_features:    Tensor (num_regions, feature_dim)
         decoder_input_ids: Tensor (max_len - 1,)
         target_ids:        Tensor (max_len - 1,)
         attention_mask:    Tensor (max_len - 1,)
         loss_mask:         Tensor (max_len - 1,)
+
+    Kích thước image_features được xác định từ feature thực tế
+    hoặc expected_feature_shape truyền vào khi khởi tạo.
     """
 
     def __init__(
@@ -34,6 +37,7 @@ class Flickr30kDataset(Dataset):
         feature_dir,
         split="train",
         max_len=MAX_LEN,
+        expected_feature_shape=None,
     ):
         super().__init__()
 
@@ -50,6 +54,26 @@ class Flickr30kDataset(Dataset):
         self.feature_dir = Path(feature_dir)
         self.split = split
         self.max_len = max_len
+
+        self.expected_feature_shape = (
+            tuple(expected_feature_shape)
+            if expected_feature_shape is not None
+            else None
+        )
+
+        if (
+            self.expected_feature_shape is not None
+            and (
+                len(self.expected_feature_shape) != 2
+                or any(dim <= 0 for dim in self.expected_feature_shape)
+            )
+        ):
+            raise ValueError(
+                "expected_feature_shape phải gồm 2 chiều dương"
+            )
+
+        self._feature_shape = self.expected_feature_shape
+        self._feature_cache = {}
 
         for path, name in [
             (self.csv_path, "CSV"),
@@ -103,8 +127,6 @@ class Flickr30kDataset(Dataset):
 
         self.tokenizer = load_gpt2_tokenizer()
 
-        self._feature_cache = {}
-
     def __len__(self):
         return len(self.records)
 
@@ -127,19 +149,32 @@ class Flickr30kDataset(Dataset):
 
         if array.ndim != 2:
             raise ValueError(
-                f"Feature {image_name} phải là ma trận 2D, "
-                f"nhận được shape {array.shape}"
-            )
-
-        if array.shape != (49, 576):
-            raise ValueError(
-                f"Feature {image_name} có shape {array.shape}, "
-                "mong đợi (49, 576)"
+                f"Feature {image_name} phải có 2 chiều, "
+                f"nhưng nhận được shape {array.shape}"
             )
 
         if not np.isfinite(array).all():
             raise ValueError(
                 f"Feature {image_name} chứa NaN hoặc Inf"
+            )
+
+        current_shape = tuple(array.shape)
+
+        if self.expected_feature_shape is not None:
+            if current_shape != self.expected_feature_shape:
+                raise ValueError(
+                    f"Feature {image_name} có shape {current_shape}, "
+                    f"mong đợi {self.expected_feature_shape}"
+                )
+
+        if self._feature_shape is None:
+            self._feature_shape = current_shape
+
+        elif current_shape != self._feature_shape:
+            raise ValueError(
+                f"Feature {image_name} có shape {current_shape}, "
+                f"không đồng nhất với feature trước đó "
+                f"{self._feature_shape}"
             )
 
         feature = torch.from_numpy(
