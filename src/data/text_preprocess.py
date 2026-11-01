@@ -1,59 +1,120 @@
-import json
 import re
-from collections import Counter
+import html
 from pathlib import Path
+from functools import lru_cache
 
 import pandas as pd
+from transformers import GPT2Tokenizer
 
 
 # =========================================================
-# 1. Special tokens
+# 1. Configuration and special tokens
 # =========================================================
 
-PAD_TOKEN = "<pad>"
-UNK_TOKEN = "<unk>"
-BOS_TOKEN = "<start>"
-EOS_TOKEN = "<end>"
+TOKENIZER_NAME = "gpt2"
+MAX_LEN = 40
 
-SPECIAL_TOKENS = [
-    PAD_TOKEN,
-    UNK_TOKEN,
-    BOS_TOKEN,
-    EOS_TOKEN,
-]
+BOS_TOKEN = "<|endoftext|>"
+EOS_TOKEN = "<|endoftext|>"
+PAD_TOKEN = "<|endoftext|>"
+
+GPT2_VOCAB_SIZE = 50257
+SPECIAL_TOKEN_ID = 50256
 
 
 # =========================================================
-# 2. Tokenize caption
+# 2. Load shared GPT-2 BPE tokenizer
 # =========================================================
 
-def tokenize_caption(text):
+@lru_cache(maxsize=1)
+def load_gpt2_tokenizer():
     """
-    Chuyển một caption thành danh sách token.
-    Ví dụ: "A dog is running!"
-    -> ["a", "dog", "is", "running", "!"]
+    Load GPT-2 BPE tokenizer.
+
+    BOS, EOS and PAD use the same token:
+    <|endoftext|>, ID 50256.
+
+    No new token is added to GPT-2 vocabulary.
     """
+
+    tokenizer = GPT2Tokenizer.from_pretrained(TOKENIZER_NAME)
+
+    tokenizer.bos_token = BOS_TOKEN
+    tokenizer.eos_token = EOS_TOKEN
+    tokenizer.pad_token = PAD_TOKEN
+
+    if tokenizer.vocab_size != GPT2_VOCAB_SIZE:
+        raise ValueError(
+            f"GPT-2 vocabulary phải có {GPT2_VOCAB_SIZE} tokens, "
+            f"nhận được {tokenizer.vocab_size}"
+        )
+
+    if not (
+        tokenizer.bos_token_id
+        == tokenizer.eos_token_id
+        == tokenizer.pad_token_id
+        == SPECIAL_TOKEN_ID
+    ):
+        raise ValueError("BOS, EOS, PAD phải cùng có ID 50256.")
+
+    return tokenizer
+
+
+# =========================================================
+# 3. Light cleaning and noise removal
+# =========================================================
+
+def clean_caption(text):
+    """
+    Light cleaning for Flickr30k captions.
+
+    - Decode HTML entities.
+    - Remove invalid control characters.
+    - Normalize whitespace.
+    - Preserve English capitalization and punctuation.
+    - Do not perform word-level tokenization.
+    """
+
     if not isinstance(text, str):
-        text = ""
+        return ""
 
-    text = text.lower().strip()
+    text = html.unescape(text)
 
-    return re.findall(r"[a-z0-9]+|[^\w\s]", text)
+    # Remove null bytes and invalid control characters.
+    text = re.sub(
+        r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]",
+        "",
+        text,
+    )
+
+    # Normalize whitespace.
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
 
 
 # =========================================================
-# 3. Load captions từ CSV Flickr30k
+# 4. Load Flickr30k captions
 # =========================================================
 
 def load_captions(csv_path):
     """
-    Đọc CSV Flickr30k, chuẩn hóa tên cột và loại bỏ
-    caption trống. Trả về DataFrame có image_name, comment.
+    Read Flickr30k results.csv.
+
+    Return DataFrame with:
+        image_name
+        comment
+
+    Empty captions and exact duplicate image-caption pairs
+    are removed.
     """
+
     csv_path = Path(csv_path)
 
     if not csv_path.exists():
-        raise FileNotFoundError(f"Không tìm thấy CSV: {csv_path}")
+        raise FileNotFoundError(
+            f"Không tìm thấy CSV: {csv_path}"
+        )
 
     df = pd.read_csv(
         csv_path,
@@ -61,14 +122,11 @@ def load_captions(csv_path):
         skipinitialspace=True,
     )
 
-    df.columns = df.columns.astype(str).str.strip()
-
-    # Chuẩn hóa tên cột để tránh lỗi do khoảng trắng
-    normalized_columns = {
-        col: col.strip().lower()
-        for col in df.columns
-    }
-    df = df.rename(columns=normalized_columns)
+    df.columns = (
+        df.columns.astype(str)
+        .str.strip()
+        .str.lower()
+    )
 
     required = {"image_name", "comment"}
 
@@ -78,11 +136,19 @@ def load_captions(csv_path):
             f"các cột hiện có: {df.columns.tolist()}"
         )
 
+    df = df[["image_name", "comment"]].copy()
+
     df["image_name"] = (
-        df["image_name"].fillna("").astype(str).str.strip()
+        df["image_name"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
     )
+
     df["comment"] = (
-        df["comment"].fillna("").astype(str).str.strip()
+        df["comment"]
+        .fillna("")
+        .apply(clean_caption)
     )
 
     df = df[
@@ -90,167 +156,187 @@ def load_captions(csv_path):
         & (df["comment"] != "")
     ].copy()
 
-    # Loại caption trùng của cùng một ảnh
     df = df.drop_duplicates(
         subset=["image_name", "comment"],
         keep="first",
     ).reset_index(drop=True)
 
     if df.empty:
-        raise ValueError(f"Không có caption hợp lệ trong CSV: {csv_path}")
-
-    return df[["image_name", "comment"]]
-
-
-# =========================================================
-# 4. Build vocabulary từ caption tập train
-# =========================================================
-
-def build_vocab(captions, min_freq=2):
-    """
-    Xây dựng vocabulary từ caption train.
-    Các token đặc biệt luôn được đặt ở đầu vocabulary.
-    """
-    if min_freq < 1:
-        raise ValueError("min_freq phải >= 1")
-
-    counter = Counter()
-
-    for caption in captions:
-        counter.update(tokenize_caption(caption))
-
-    vocab = {
-        token: idx
-        for idx, token in enumerate(SPECIAL_TOKENS)
-    }
-
-    for token, frequency in counter.most_common():
-        if frequency >= min_freq and token not in vocab:
-            vocab[token] = len(vocab)
-
-    return vocab
-
-
-# =========================================================
-# 5. Encode caption thành các ID
-# =========================================================
-
-def encode_caption(caption, vocab, max_len=40):
-    """
-    Chuyển caption thành dãy ID:
-    <start> + tokens + <end> + <pad>
-
-    Kết quả có độ dài chính xác max_len.
-    """
-    if max_len < 2:
-        raise ValueError("max_len phải >= 2 để chứa <start> và <end>")
-
-    for token in SPECIAL_TOKENS:
-        if token not in vocab:
-            raise ValueError(
-                f"Vocabulary thiếu token bắt buộc: {token}"
-            )
-
-    tokens = tokenize_caption(caption)
-
-    start_id = vocab[BOS_TOKEN]
-    end_id = vocab[EOS_TOKEN]
-    pad_id = vocab[PAD_TOKEN]
-    unk_id = vocab[UNK_TOKEN]
-
-    # Chừa vị trí cho <start> và <end>
-    tokens = tokens[:max_len - 2]
-
-    token_ids = [
-        vocab.get(token, unk_id)
-        for token in tokens
-    ]
-
-    ids = [start_id] + token_ids + [end_id]
-
-    if len(ids) < max_len:
-        ids.extend([pad_id] * (max_len - len(ids)))
-
-    return ids
-
-
-# =========================================================
-# 6. Decode ID thành caption
-# =========================================================
-
-def decode_caption(ids, vocab):
-    """
-    Chuyển ID về caption, bỏ qua token đặc biệt.
-    Dừng khi gặp <end>.
-    """
-    idx_to_token = {
-        int(idx): token
-        for token, idx in vocab.items()
-    }
-
-    tokens = []
-
-    for value in ids:
-        # Hỗ trợ cả số nguyên Python và Tensor scalar
-        if hasattr(value, "item"):
-            value = value.item()
-
-        token = idx_to_token.get(int(value), UNK_TOKEN)
-
-        if token == EOS_TOKEN:
-            break
-
-        if token in SPECIAL_TOKENS:
-            continue
-
-        tokens.append(token)
-
-    # Ghép dấu câu sát với từ phía trước
-    text = " ".join(tokens)
-    text = re.sub(r"\s+([.,!?;:%])", r"\1", text)
-    text = re.sub(r"([(])\s+", r"\1", text)
-
-    return text.strip()
-
-
-# =========================================================
-# 7. Save vocabulary
-# =========================================================
-
-def save_vocab(vocab, output_path):
-    """Lưu vocabulary thành JSON."""
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(vocab, f, ensure_ascii=False, indent=2)
-
-
-# =========================================================
-# 8. Load vocabulary
-# =========================================================
-
-def load_vocab(vocab_path):
-    """Đọc vocabulary từ JSON."""
-    vocab_path = Path(vocab_path)
-
-    if not vocab_path.exists():
-        raise FileNotFoundError(
-            f"Không tìm thấy vocabulary: {vocab_path}"
+        raise ValueError(
+            f"Không có caption hợp lệ trong CSV: {csv_path}"
         )
 
-    with open(vocab_path, "r", encoding="utf-8") as f:
-        vocab = json.load(f)
+    return df
 
-    vocab = {
-        token: int(idx)
-        for token, idx in vocab.items()
+
+# =========================================================
+# 5. GPT-2 BPE encoding
+# =========================================================
+
+def encode_caption(
+    caption,
+    tokenizer=None,
+    max_len=MAX_LEN,
+):
+    """
+    Encode one caption using GPT-2 BPE.
+
+    Sequence:
+        BOS + BPE tokens + EOS + PAD
+
+    Return:
+        input_ids:      (max_len,)
+        attention_mask: (max_len,)
+        length:         number of non-padding tokens
+
+    Attention mask is created BEFORE padding because
+    EOS and PAD share token ID 50256.
+    """
+
+    if max_len < 2:
+        raise ValueError("max_len phải >= 2.")
+
+    if tokenizer is None:
+        tokenizer = load_gpt2_tokenizer()
+
+    caption = clean_caption(caption)
+
+    # Tokenize caption without automatically adding special tokens.
+    token_ids = tokenizer.encode(
+        caption,
+        add_special_tokens=False,
+    )
+
+    # Reserve two positions for BOS and EOS.
+    token_ids = token_ids[:max_len - 2]
+
+    # Add BOS and EOS.
+    token_ids = (
+        [tokenizer.bos_token_id]
+        + token_ids
+        + [tokenizer.eos_token_id]
+    )
+
+    # Build attention mask before padding.
+    actual_length = len(token_ids)
+
+    attention_mask = [1] * actual_length
+
+    # Pad to fixed length.
+    padding_length = max_len - actual_length
+
+    if padding_length > 0:
+        token_ids.extend(
+            [tokenizer.pad_token_id] * padding_length
+        )
+
+        attention_mask.extend(
+            [0] * padding_length
+        )
+
+    assert len(token_ids) == max_len
+    assert len(attention_mask) == max_len
+
+    return {
+        "input_ids": token_ids,
+        "attention_mask": attention_mask,
+        "length": actual_length,
     }
 
-    for token in SPECIAL_TOKENS:
-        if token not in vocab:
-            raise ValueError(
-                f"Vocabulary thiếu token bắt buộc: {token}"
-            )
 
-    return vocab
+# =========================================================
+# 6. Create Teacher Forcing / Sequence Generator pairs
+# =========================================================
+
+def create_sequence_pair(encoded_caption):
+    """
+    Create decoder input and target sequences.
+
+    Example:
+        Full sequence: [BOS, A, dog, EOS, PAD, PAD]
+
+        Decoder input:
+            [BOS, A, dog, EOS, PAD]
+
+        Target:
+            [A, dog, EOS, PAD, PAD]
+
+        Loss mask:
+            [1, 1, 1, 0, 0]
+
+    EOS is included in loss.
+    PAD positions are ignored in loss.
+    """
+
+    input_ids = encoded_caption["input_ids"]
+    attention_mask = encoded_caption["attention_mask"]
+
+    if len(input_ids) != len(attention_mask):
+        raise ValueError(
+            "input_ids và attention_mask phải cùng độ dài."
+        )
+
+    if len(input_ids) < 2:
+        raise ValueError(
+            "Sequence cần ít nhất hai token để tạo input-target."
+        )
+
+    decoder_input_ids = input_ids[:-1]
+    target_ids = input_ids[1:]
+
+    # The target mask excludes PAD but retains the real EOS.
+    loss_mask = attention_mask[1:]
+
+    return {
+        "decoder_input_ids": decoder_input_ids,
+        "target_ids": target_ids,
+        "loss_mask": loss_mask,
+    }
+
+
+# =========================================================
+# 7. Decode GPT-2 token IDs
+# =========================================================
+
+
+def decode_caption(
+    token_ids,
+    tokenizer=None,
+    skip_special_tokens=True,
+):
+    """
+    Decode GPT-2 token IDs into a readable caption.
+
+    Skip the initial BOS token.
+    Stop at the next EOS token.
+    """
+
+    if tokenizer is None:
+        tokenizer = load_gpt2_tokenizer()
+
+    if hasattr(token_ids, "tolist"):
+        token_ids = token_ids.tolist()
+
+    if token_ids and isinstance(token_ids[0], list):
+        token_ids = token_ids[0]
+
+    decoded_ids = []
+
+    for position, token_id in enumerate(token_ids):
+        token_id = int(token_id)
+
+        # Skip BOS at the beginning.
+        if position == 0 and token_id == tokenizer.bos_token_id:
+            continue
+
+        # Stop at the real EOS after BOS.
+        if token_id == tokenizer.eos_token_id:
+            break
+
+        decoded_ids.append(token_id)
+
+    return tokenizer.decode(
+        decoded_ids,
+        skip_special_tokens=skip_special_tokens,
+        clean_up_tokenization_spaces=False,
+    ).strip()
