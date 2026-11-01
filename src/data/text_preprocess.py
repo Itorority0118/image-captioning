@@ -7,10 +7,6 @@ import pandas as pd
 from transformers import GPT2Tokenizer
 
 
-# =========================================================
-# 1. Configuration and special tokens
-# =========================================================
-
 TOKENIZER_NAME = "gpt2"
 MAX_LEN = 40
 
@@ -21,10 +17,6 @@ PAD_TOKEN = "<|endoftext|>"
 GPT2_VOCAB_SIZE = 50257
 SPECIAL_TOKEN_ID = 50256
 
-
-# =========================================================
-# 2. Load shared GPT-2 BPE tokenizer
-# =========================================================
 
 @lru_cache(maxsize=1)
 def load_gpt2_tokenizer():
@@ -60,9 +52,6 @@ def load_gpt2_tokenizer():
     return tokenizer
 
 
-# =========================================================
-# 3. Light cleaning and noise removal
-# =========================================================
 
 def clean_caption(text):
     """
@@ -80,22 +69,16 @@ def clean_caption(text):
 
     text = html.unescape(text)
 
-    # Remove null bytes and invalid control characters.
     text = re.sub(
         r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]",
         "",
         text,
     )
 
-    # Normalize whitespace.
     text = re.sub(r"\s+", " ", text).strip()
 
     return text
 
-
-# =========================================================
-# 4. Load Flickr30k captions
-# =========================================================
 
 def load_captions(csv_path):
     """
@@ -169,10 +152,6 @@ def load_captions(csv_path):
     return df
 
 
-# =========================================================
-# 5. GPT-2 BPE encoding
-# =========================================================
-
 def encode_caption(
     caption,
     tokenizer=None,
@@ -201,28 +180,23 @@ def encode_caption(
 
     caption = clean_caption(caption)
 
-    # Tokenize caption without automatically adding special tokens.
     token_ids = tokenizer.encode(
         caption,
         add_special_tokens=False,
     )
 
-    # Reserve two positions for BOS and EOS.
     token_ids = token_ids[:max_len - 2]
 
-    # Add BOS and EOS.
     token_ids = (
         [tokenizer.bos_token_id]
         + token_ids
         + [tokenizer.eos_token_id]
     )
 
-    # Build attention mask before padding.
     actual_length = len(token_ids)
 
     attention_mask = [1] * actual_length
 
-    # Pad to fixed length.
     padding_length = max_len - actual_length
 
     if padding_length > 0:
@@ -243,10 +217,6 @@ def encode_caption(
         "length": actual_length,
     }
 
-
-# =========================================================
-# 6. Create Teacher Forcing / Sequence Generator pairs
-# =========================================================
 
 def create_sequence_pair(encoded_caption):
     """
@@ -284,7 +254,6 @@ def create_sequence_pair(encoded_caption):
     decoder_input_ids = input_ids[:-1]
     target_ids = input_ids[1:]
 
-    # The target mask excludes PAD but retains the real EOS.
     loss_mask = attention_mask[1:]
 
     return {
@@ -292,11 +261,6 @@ def create_sequence_pair(encoded_caption):
         "target_ids": target_ids,
         "loss_mask": loss_mask,
     }
-
-
-# =========================================================
-# 7. Decode GPT-2 token IDs
-# =========================================================
 
 
 def decode_caption(
@@ -325,11 +289,9 @@ def decode_caption(
     for position, token_id in enumerate(token_ids):
         token_id = int(token_id)
 
-        # Skip BOS at the beginning.
         if position == 0 and token_id == tokenizer.bos_token_id:
             continue
 
-        # Stop at the real EOS after BOS.
         if token_id == tokenizer.eos_token_id:
             break
 
