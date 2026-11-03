@@ -1,7 +1,9 @@
 import argparse
 import os
 import random
+import shutil
 import time
+from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
@@ -101,8 +103,27 @@ def main():
     criterion = nn.CrossEntropyLoss(ignore_index=-100)
 
     best_val = float("inf")
+    start_epoch = 1
 
-    for epoch in range(1, epochs + 1):
+    drive_base = next((Path(p) for p in ["/content/drive/MyDrive", "/content/gdrive/MyDrive"] if os.path.exists(p)), None)
+    drive_ckpt_dir = (drive_base / "captioning" / "checkpoints" / f"{encoder}_{decoder}") if drive_base else None
+
+    last_ckpt = ckpt_dir / "last.pt"
+    if not last_ckpt.exists() and not args.debug and drive_ckpt_dir and (drive_ckpt_dir / "last.pt").exists():
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        for pt in drive_ckpt_dir.glob("*.pt"):
+            shutil.copy2(pt, ckpt_dir / pt.name)
+
+    if last_ckpt.exists() and not args.debug:
+        ckpt = torch.load(last_ckpt, map_location=device)
+        if ckpt.get("encoder") == encoder and ckpt.get("decoder") == decoder:
+            print(f"Khôi phục tiến trình từ {last_ckpt} (Epoch {ckpt['epoch']})...")
+            model.load_state_dict(ckpt["model_state_dict"])
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            start_epoch = ckpt["epoch"] + 1
+            best_val = ckpt.get("best_val", ckpt.get("val_loss", float("inf")))
+
+    for epoch in range(start_epoch, epochs + 1):
         model.train()
         train_loss, t0 = 0.0, time.time()
 
@@ -123,6 +144,10 @@ def main():
 
         avg_train = train_loss / max(1, len(train_loader))
         avg_val = val_loss / max(1, len(val_loader))
+        is_best = avg_val <= best_val
+        if is_best:
+            best_val = avg_val
+
         print(f"=> Epoch {epoch}/{epochs} ({time.time() - t0:.1f}s) | Train Loss: {avg_train:.4f} | Val Loss: {avg_val:.4f}")
 
         ckpt = {
@@ -132,12 +157,21 @@ def main():
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "val_loss": avg_val,
+            "best_val": best_val,
             "config": cfg,
         }
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
         torch.save(ckpt, ckpt_dir / "last.pt")
-        if avg_val <= best_val:
-            best_val = avg_val
+        if is_best:
             torch.save(ckpt, ckpt_dir / "best.pt")
+
+        if drive_ckpt_dir and not args.debug:
+            drive_ckpt_dir.mkdir(parents=True, exist_ok=True)
+            for name in ("last.pt", "best.pt") if is_best else ("last.pt",):
+                tmp_path = drive_ckpt_dir / f"{name}.tmp"
+                shutil.copy2(ckpt_dir / name, tmp_path)
+                tmp_path.replace(drive_ckpt_dir / name)
+            print(f"  Đã sao lưu an toàn epoch {epoch} lên Drive: {drive_ckpt_dir}")
 
 
 if __name__ == "__main__":
