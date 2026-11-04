@@ -1,0 +1,11 @@
+# Model configuration: MobileNetV3-Small + LSTM + Attention
+
+encoder: mobilenetv3
+decoder: lstm
+feature_dim: 576
+num_regions: 49
+max_len: 40
+batch_size: 64
+learning_rate: 0.0001
+epochs: 10
+seed: 42
