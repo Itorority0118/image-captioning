@@ -35,18 +35,18 @@ def build_decoder(decoder_name, feature_dim):
 
 
 def forward_loss(model, batch, criterion, device):
-    features = batch["image_features"].to(device)
-    inp = batch["decoder_input_ids"].to(device)
-    mask = batch["attention_mask"].to(device)
-    targets = batch["target_ids"].to(device)
-    loss_mask = batch["loss_mask"].to(device)
+    features = batch["image_features"].to(device, non_blocking=True)
+    inp = batch["decoder_input_ids"].to(device, non_blocking=True)
+    mask = batch["attention_mask"].to(device, non_blocking=True)
+    targets = batch["target_ids"].to(device, non_blocking=True)
+    loss_mask = batch["loss_mask"].to(device, non_blocking=True)
 
-    logits = model(features, inp, mask) if getattr(model, "gpt2", None) else model(features, inp)
-    if isinstance(logits, tuple):
-        logits = logits[0]
-
-    targets = targets.masked_fill(loss_mask == 0, -100)
-    return criterion(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+    with torch.amp.autocast(device.type, enabled=(device.type == "cuda")):
+        logits = model(features, inp, mask) if getattr(model, "gpt2", None) else model(features, inp)
+        if isinstance(logits, tuple):
+            logits = logits[0]
+        targets = targets.masked_fill(loss_mask == 0, -100)
+        return criterion(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
 
 
 def main():
@@ -93,18 +93,25 @@ def main():
         train_ds = Subset(train_ds, range(min(32, len(train_ds))))
         val_ds = Subset(val_ds, range(min(32, len(val_ds))))
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
-
-    print(f"Thiết bị: {device} | Mô hình: {encoder}_{decoder} | Train: {len(train_ds)} | Val: {len(val_ds)}")
+    loader_kwargs = {" num_workers": 2, "pin_memory": True} if device.type == "cuda" and not args.debug else {}
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, **{k.strip(): v for k, v in loader_kwargs.items()})
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, **{k.strip(): v for k, v in loader_kwargs.items()})
 
     model = build_decoder(decoder, expected_shape[1]).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+
+    # Khóa wte, wpe và 10 block đầu của GPT-2 chỉ bằng 2 dòng (chừa lại h.10, h.11, ln_f, lm_head và lớp nối ảnh)
+    if getattr(model, "gpt2", None):
+        for name, param in model.gpt2.transformer.named_parameters():
+            param.requires_grad = any(k in name for k in ("h.10.", "h.11.", "ln_f"))
+
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    print(f"Thiết bị: {device} | Mô hình: {encoder}_{decoder} | Train: {len(train_ds)} | Tham số học: {sum(p.numel() for p in trainable_params):,}")
+
+    optimizer = torch.optim.AdamW(trainable_params, lr=lr)
+    scaler = torch.amp.GradScaler(device.type, enabled=(device.type == "cuda"))
     criterion = nn.CrossEntropyLoss(ignore_index=-100)
 
-    best_val = float("inf")
-    start_epoch = 1
-
+    best_val, start_epoch = float("inf"), 1
     drive_base = next((Path(p) for p in ["/content/drive/MyDrive", "/content/gdrive/MyDrive"] if os.path.exists(p)), None)
     drive_ckpt_dir = (drive_base / "captioning" / "checkpoints" / f"{encoder}_{decoder}") if drive_base else None
 
@@ -119,7 +126,10 @@ def main():
         if ckpt.get("encoder") == encoder and ckpt.get("decoder") == decoder:
             print(f"Khôi phục tiến trình từ {last_ckpt} (Epoch {ckpt['epoch']})...")
             model.load_state_dict(ckpt["model_state_dict"])
-            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            try:
+                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            except ValueError:
+                print("  -> Cấu hình freeze thay đổi, khởi tạo lại trạng thái Optimizer.")
             start_epoch = ckpt["epoch"] + 1
             best_val = ckpt.get("best_val", ckpt.get("val_loss", float("inf")))
 
@@ -128,11 +138,13 @@ def main():
         train_loss, t0 = 0.0, time.time()
 
         for step, batch in enumerate(train_loader, 1):
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             loss = forward_loss(model, batch, criterion, device)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
+            scaler.step(optimizer)
+            scaler.update()
             train_loss += loss.item()
 
             if step % 100 == 0 or (args.debug and step == len(train_loader)):
