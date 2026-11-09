@@ -1,4 +1,3 @@
-
 import json
 from pathlib import Path
 
@@ -14,22 +13,7 @@ from src.data.text_preprocess import (
     load_gpt2_tokenizer,
 )
 
-
 class Flickr30kDataset(Dataset):
-    """
-    Dataset Flickr30k cho Image Captioning.
-
-    Mỗi phần tử trả về:
-        image_features:    Tensor (num_regions, feature_dim)
-        decoder_input_ids: Tensor (max_len - 1,)
-        target_ids:        Tensor (max_len - 1,)
-        attention_mask:    Tensor (max_len - 1,)
-        loss_mask:         Tensor (max_len - 1,)
-
-    Kích thước image_features được xác định từ feature thực tế
-    hoặc expected_feature_shape truyền vào khi khởi tạo.
-    """
-
     def __init__(
         self,
         csv_path,
@@ -73,7 +57,6 @@ class Flickr30kDataset(Dataset):
             )
 
         self._feature_shape = self.expected_feature_shape
-        self._feature_cache = {}
 
         for path, name in [
             (self.csv_path, "CSV"),
@@ -127,13 +110,10 @@ class Flickr30kDataset(Dataset):
 
         self.tokenizer = load_gpt2_tokenizer()
 
-    def __len__(self):
-        return len(self.records)
+        self._preload_features()
+        self._preload_captions()
 
-    def _load_feature(self, image_name):
-        if image_name in self._feature_cache:
-            return self._feature_cache[image_name]
-
+    def _read_feature(self, image_name):
         feature_path = (
             self.feature_dir
             / f"{Path(image_name).stem}.npy"
@@ -177,44 +157,73 @@ class Flickr30kDataset(Dataset):
                 f"{self._feature_shape}"
             )
 
-        feature = torch.from_numpy(
-            array.astype(np.float32)
-        )
+        return array
 
-        self._feature_cache.clear()
-        self._feature_cache[image_name] = feature
+    def _preload_features(self):
+        self.image_index = {}
+        image_list = []
+        for image_name, caption in self.records:
+            if image_name not in self.image_index:
+                self.image_index[image_name] = len(image_list)
+                image_list.append(image_name)
 
-        return feature
+        total = len(image_list)
+        print(f"[{self.split}] Nạp sẵn feature của {total} ảnh vào RAM...", flush=True)
+
+        self.features = None
+        for i in range(total):
+            array = self._read_feature(image_list[i])
+            if self.features is None:
+                self.features = np.zeros(
+                    (total, array.shape[0], array.shape[1]),
+                    dtype=np.float16,
+                )
+            self.features[i] = array
+            if (i + 1) % 5000 == 0:
+                print(f"  đã nạp {i + 1}/{total} ảnh", flush=True)
+
+    def _preload_captions(self):
+        total = len(self.records)
+        length = self.max_len - 1
+        print(f"[{self.split}] Mã hóa sẵn {total} caption...", flush=True)
+
+        self.record_image = np.zeros(total, dtype=np.int64)
+        self.decoder_input_ids = np.zeros((total, length), dtype=np.int64)
+        self.target_ids = np.zeros((total, length), dtype=np.int64)
+        self.attention_mask = np.zeros((total, length), dtype=np.int64)
+        self.loss_mask = np.zeros((total, length), dtype=np.int64)
+
+        for i in range(total):
+            image_name, caption = self.records[i]
+
+            encoded = encode_caption(
+                caption,
+                tokenizer=self.tokenizer,
+                max_len=self.max_len,
+            )
+            sequence = create_sequence_pair(encoded)
+
+            self.record_image[i] = self.image_index[image_name]
+            self.decoder_input_ids[i] = sequence["decoder_input_ids"]
+            self.target_ids[i] = sequence["target_ids"]
+            self.attention_mask[i] = encoded["attention_mask"][:-1]
+            self.loss_mask[i] = sequence["loss_mask"]
+
+            if (i + 1) % 50000 == 0:
+                print(f"  đã mã hóa {i + 1}/{total} caption", flush=True)
+
+    def __len__(self):
+        return len(self.records)
 
     def __getitem__(self, index):
-        image_name, caption = self.records[index]
-
-        image_features = self._load_feature(image_name)
-
-        encoded = encode_caption(
-            caption,
-            tokenizer=self.tokenizer,
-            max_len=self.max_len,
-        )
-
-        sequence = create_sequence_pair(encoded)
+        feature = torch.from_numpy(
+            self.features[self.record_image[index]]
+        ).float()
 
         return {
-            "image_features": image_features,
-            "decoder_input_ids": torch.tensor(
-                sequence["decoder_input_ids"],
-                dtype=torch.long,
-            ),
-            "target_ids": torch.tensor(
-                sequence["target_ids"],
-                dtype=torch.long,
-            ),
-            "attention_mask": torch.tensor(
-                encoded["attention_mask"][:-1],
-                dtype=torch.long,
-            ),
-            "loss_mask": torch.tensor(
-                sequence["loss_mask"],
-                dtype=torch.long,
-            ),
+            "image_features": feature,
+            "decoder_input_ids": torch.from_numpy(self.decoder_input_ids[index]),
+            "target_ids": torch.from_numpy(self.target_ids[index]),
+            "attention_mask": torch.from_numpy(self.attention_mask[index]),
+            "loss_mask": torch.from_numpy(self.loss_mask[index]),
         }
