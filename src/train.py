@@ -42,7 +42,7 @@ def forward_loss(model, batch, criterion, device):
     loss_mask = batch["loss_mask"].to(device, non_blocking=True)
 
     with torch.amp.autocast(device.type, enabled=(device.type == "cuda")):
-        logits = model(features, inp, mask) if getattr(model, "gpt2", None) else model(features, inp)
+        logits = model(features, inp, mask) if hasattr(model, "gpt2") else model(features, inp)
         if isinstance(logits, tuple):
             logits = logits[0]
         targets = targets.masked_fill(loss_mask == 0, -100)
@@ -68,8 +68,8 @@ def main():
     encoder = args.encoder or cfg.get("encoder", "efficientnet_b0")
     decoder = args.decoder or cfg.get("decoder", "gpt2")
     max_len = int(cfg.get("max_len", 40))
-    batch_size = args.batch_size or int(cfg.get("batch_size", 64))
-    lr = args.lr or float(cfg.get("learning_rate", 1e-4))
+    batch_size = args.batch_size or int(cfg.get("batch_size", 128))
+    lr = args.lr or float(cfg.get("learning_rate", 3e-4))
     epochs = args.epochs or int(cfg.get("epochs", 10))
 
     if args.debug:
@@ -77,6 +77,8 @@ def main():
 
     set_seed(int(cfg.get("seed", 42)))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
 
     splits_path = args.splits or (
         "configs/splits_sample.json" if args.debug and os.path.exists("configs/splits_sample.json") else "configs/splits.json"
@@ -93,21 +95,20 @@ def main():
         train_ds = Subset(train_ds, range(min(32, len(train_ds))))
         val_ds = Subset(val_ds, range(min(32, len(val_ds))))
 
-    loader_kwargs = {" num_workers": 2, "pin_memory": True} if device.type == "cuda" and not args.debug else {}
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, **{k.strip(): v for k, v in loader_kwargs.items()})
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, **{k.strip(): v for k, v in loader_kwargs.items()})
+    loader_kwargs = {"num_workers": 4, "pin_memory": True, "persistent_workers": True} if device.type == "cuda" and not args.debug else {}
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_ds, batch_size=batch_size * 2, shuffle=False, **loader_kwargs)
 
     model = build_decoder(decoder, expected_shape[1]).to(device)
 
-    # Khóa wte, wpe và 10 block đầu của GPT-2 chỉ bằng 2 dòng (chừa lại h.10, h.11, ln_f, lm_head và lớp nối ảnh)
-    if getattr(model, "gpt2", None):
+    if hasattr(model, "gpt2"):
         for name, param in model.gpt2.transformer.named_parameters():
             param.requires_grad = any(k in name for k in ("h.10.", "h.11.", "ln_f"))
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     print(f"Thiết bị: {device} | Mô hình: {encoder}_{decoder} | Train: {len(train_ds)} | Tham số học: {sum(p.numel() for p in trainable_params):,}")
 
-    optimizer = torch.optim.AdamW(trainable_params, lr=lr)
+    optimizer = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=1e-2)
     scaler = torch.amp.GradScaler(device.type, enabled=(device.type == "cuda"))
     criterion = nn.CrossEntropyLoss(ignore_index=-100)
 
@@ -115,23 +116,21 @@ def main():
     drive_base = next((Path(p) for p in ["/content/drive/MyDrive", "/content/gdrive/MyDrive"] if os.path.exists(p)), None)
     drive_ckpt_dir = (drive_base / "captioning" / "checkpoints" / f"{encoder}_{decoder}") if drive_base else None
 
-    last_ckpt = ckpt_dir / "last.pt"
-    if not last_ckpt.exists() and not args.debug and drive_ckpt_dir and (drive_ckpt_dir / "last.pt").exists():
+    best_ckpt = ckpt_dir / "best.pt"
+    if not best_ckpt.exists() and not args.debug and drive_ckpt_dir and (drive_ckpt_dir / "best.pt").exists():
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        for pt in drive_ckpt_dir.glob("*.pt"):
-            shutil.copy2(pt, ckpt_dir / pt.name)
+        shutil.copy2(drive_ckpt_dir / "best.pt", best_ckpt)
 
-    if last_ckpt.exists() and not args.debug:
-        ckpt = torch.load(last_ckpt, map_location=device)
+    if best_ckpt.exists() and not args.debug:
+        ckpt = torch.load(best_ckpt, map_location=device)
         if ckpt.get("encoder") == encoder and ckpt.get("decoder") == decoder:
-            print(f"Khôi phục tiến trình từ {last_ckpt} (Epoch {ckpt['epoch']})...")
             model.load_state_dict(ckpt["model_state_dict"])
-            try:
-                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-            except ValueError:
-                print("  -> Cấu hình freeze thay đổi, khởi tạo lại trạng thái Optimizer.")
             start_epoch = ckpt["epoch"] + 1
-            best_val = ckpt.get("best_val", ckpt.get("val_loss", float("inf")))
+            best_val = ckpt.get("best_val", float("inf"))
+            print(f"Khôi phục từ {best_ckpt} (Epoch {ckpt['epoch']}, Best Val: {best_val:.4f})")
+
+    remaining_epochs = max(1, epochs - start_epoch + 1)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=remaining_epochs * len(train_loader), eta_min=1e-6)
 
     for epoch in range(start_epoch, epochs + 1):
         model.train()
@@ -145,9 +144,10 @@ def main():
             torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
             scaler.step(optimizer)
             scaler.update()
+            scheduler.step()
             train_loss += loss.item()
 
-            if step % 100 == 0 or (args.debug and step == len(train_loader)):
+            if step % 200 == 0 or (args.debug and step == len(train_loader)):
                 print(f"  [Epoch {epoch}/{epochs}] Step {step}/{len(train_loader)} | Loss: {loss.item():.4f}", flush=True)
 
         model.eval()
@@ -156,34 +156,28 @@ def main():
 
         avg_train = train_loss / max(1, len(train_loader))
         avg_val = val_loss / max(1, len(val_loader))
-        is_best = avg_val <= best_val
-        if is_best:
-            best_val = avg_val
+        is_best = avg_val < best_val
 
-        print(f"=> Epoch {epoch}/{epochs} ({time.time() - t0:.1f}s) | Train Loss: {avg_train:.4f} | Val Loss: {avg_val:.4f}")
+        print(f"=> Epoch {epoch}/{epochs} ({time.time() - t0:.1f}s) | Train: {avg_train:.4f} | Val: {avg_val:.4f}")
 
         ckpt = {
             "epoch": epoch,
             "encoder": encoder,
             "decoder": decoder,
             "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
             "val_loss": avg_val,
-            "best_val": best_val,
-            "config": cfg,
+            "best_val": min(best_val, avg_val),
         }
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         torch.save(ckpt, ckpt_dir / "last.pt")
-        if is_best:
-            torch.save(ckpt, ckpt_dir / "best.pt")
 
-        if drive_ckpt_dir and not args.debug:
-            drive_ckpt_dir.mkdir(parents=True, exist_ok=True)
-            for name in ("last.pt", "best.pt") if is_best else ("last.pt",):
-                tmp_path = drive_ckpt_dir / f"{name}.tmp"
-                shutil.copy2(ckpt_dir / name, tmp_path)
-                tmp_path.replace(drive_ckpt_dir / name)
-            print(f"  Đã sao lưu an toàn epoch {epoch} lên Drive: {drive_ckpt_dir}")
+        if is_best:
+            best_val = avg_val
+            torch.save(ckpt, best_ckpt)
+            if drive_ckpt_dir and not args.debug:
+                drive_ckpt_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(best_ckpt, drive_ckpt_dir / "best.pt")
+                print(f"  [Drive] Đã cập nhật best.pt (Val Loss: {best_val:.4f})")
 
 
 if __name__ == "__main__":
