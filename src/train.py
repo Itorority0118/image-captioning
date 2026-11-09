@@ -62,7 +62,7 @@ def main():
     if args.debug:
         train_ds, val_ds = Subset(train_ds, range(min(32, len(train_ds)))), Subset(val_ds, range(min(32, len(val_ds))))
 
-    kw = {"num_workers": 4, "pin_memory": True, "persistent_workers": True} if device.type == "cuda" and not args.debug else {}
+    kw = {"num_workers": 2, "pin_memory": True} if device.type == "cuda" and not args.debug else {}
     train_loader = DataLoader(train_ds, batch_size=bs, shuffle=True, **kw)
     val_loader = DataLoader(val_ds, batch_size=bs * 2, shuffle=False, **kw)
 
