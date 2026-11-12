@@ -11,7 +11,8 @@ def contrastive_search(
     features,
     max_len=40,
     top_k=5,
-    alpha=0.6
+    alpha=0.6,
+    return_attention=False
 ):
 
     if not hasattr(model, "forward_step"):
@@ -56,13 +57,25 @@ def contrastive_search(
 
         feature_keys = model.attention.feature_proj(features)
 
-        logits, hidden, cell, feature_keys = model.forward_step(
-            features,
-            input_ids,
-            feature_keys=feature_keys
-        )
+        # Initial decoding step
+        if return_attention:
+            logits, hidden, cell, feature_keys, attention_weights = (
+                model.forward_step(
+                    features,
+                    input_ids,
+                    feature_keys=feature_keys,
+                    return_attention=True
+                )
+            )
+        else:
+            logits, hidden, cell, feature_keys = model.forward_step(
+                features,
+                input_ids,
+                feature_keys=feature_keys
+            )
 
         hidden_history = [hidden.squeeze(0)]
+        attention_history = []
 
         for _ in range(max_len - 1):
 
@@ -102,6 +115,7 @@ def contrastive_search(
 
             candidate_inputs = candidate_ids.unsqueeze(1)
 
+            # Evaluate all candidate tokens
             candidate_logits, next_hidden, next_cell, _ = (
                 model.forward_step(
                     candidate_features,
@@ -127,6 +141,7 @@ def contrastive_search(
 
             degeneration_penalty = similarity.max(dim=1).values
 
+            # Original Contrastive Search scoring
             scores = (
                 candidate_probs.squeeze(0)
                 - alpha * degeneration_penalty
@@ -136,14 +151,22 @@ def contrastive_search(
 
             next_token = candidate_ids[best_index].view(1, 1)
 
+            # Stop before recording EOS as a caption token
+            if next_token.item() == SPECIAL_TOKEN_ID:
+                break
+
+            # Save attention used to predict the selected token
+            if return_attention:
+                attention_history.append(
+                    attention_weights[0].detach().cpu().numpy()
+                )
+
             input_ids = torch.cat(
                 [input_ids, next_token],
                 dim=1
             )
 
-            if next_token.item() == SPECIAL_TOKEN_ID:
-                break
-
+            # Keep the selected candidate's states
             hidden = next_hidden[:, best_index:best_index + 1, :]
             cell = next_cell[:, best_index:best_index + 1, :]
 
@@ -153,7 +176,20 @@ def contrastive_search(
                 hidden.squeeze(0)
             )
 
-        return decode_caption(input_ids[0])
+            # Calculate attention for the next decoding step
+            if return_attention:
+                _, attention_weights = model.attention(
+                    features,
+                    hidden[-1],
+                    feature_keys=feature_keys
+                )
+
+        caption = decode_caption(input_ids[0])
+
+        if return_attention:
+            return caption, attention_history
+
+        return caption
 
     finally:
         model.train(was_training)
