@@ -1,5 +1,3 @@
-# Model configuration: MobileNetV3-Small + LSTM + Attention
-
 encoder: mobilenetv3
 decoder: lstm
 feature_dim: 576

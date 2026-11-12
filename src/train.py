@@ -83,19 +83,23 @@ def main():
     scaler = torch.amp.GradScaler(device.type, enabled=(device.type == "cuda"))
 
     best_val, start_ep = float("inf"), 1
-    drive_dir = next((Path(p) / "captioning/checkpoints" / f"{enc}_{dec}" for p in ("/content/drive/MyDrive", "/content/gdrive/MyDrive") if os.path.exists(p)), None)
+    # drive_dir = next((Path(p) / "captioning/checkpoints" / f"{enc}_{dec}" for p in ("/content/drive/MyDrive", "/content/gdrive/MyDrive") if os.path.exists(p)), None)
+    drive_dir = next((Path(p) / "captioning/checkpoints" / f"{enc}_{dec}_full" for p in ("/content/drive/MyDrive", "/content/gdrive/MyDrive") if os.path.exists(p)), None)
     best_ckpt = ckpt_dir / "best.pt"
 
-    if not args.debug and not best_ckpt.exists() and drive_dir and (drive_dir / "best.pt").exists():
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(drive_dir / "best.pt", best_ckpt)
+    # if not args.debug and not best_ckpt.exists() and drive_dir and (drive_dir / "best.pt").exists():
+    #     ckpt_dir.mkdir(parents=True, exist_ok=True)
+    #     shutil.copy2(drive_dir / "best.pt", best_ckpt)
 
-    if not args.debug and best_ckpt.exists():
-        ckpt = torch.load(best_ckpt, map_location=device, weights_only=False)
-        if ckpt.get("encoder") == enc and ckpt.get("decoder") == dec:
-            model.load_state_dict(ckpt["model_state_dict"])
-            start_ep, best_val = ckpt["epoch"] + 1, ckpt.get("best_val", float("inf"))
-            print(f"Khôi phục {best_ckpt} (Epoch {ckpt['epoch']}, Best Val: {best_val:.4f})")
+    # if not args.debug and best_ckpt.exists():
+    #     ckpt = torch.load(best_ckpt, map_location=device, weights_only=False)
+    #     if ckpt.get("encoder") == enc and ckpt.get("decoder") == dec:
+    #         model.load_state_dict(ckpt["model_state_dict"])
+    #         start_ep, best_val = ckpt["epoch"] + 1, ckpt.get("best_val", float("inf"))
+    #         print(f"Khôi phục {best_ckpt} (Epoch {ckpt['epoch']}, Best Val: {best_val:.4f})")
+
+    best_val = float("inf")
+    start_ep = 1
 
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs - start_ep + 1) * len(train_loader), eta_min=1e-6)
 
