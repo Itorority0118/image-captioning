@@ -1,7 +1,6 @@
 import torch
 from torch import nn
 
-
 class AdditiveAttention(nn.Module):
 
     def __init__(self, feature_dim, hidden_dim, attention_dim):
@@ -72,13 +71,15 @@ class LSTMDecoder(nn.Module):
         self.output = nn.Linear(hidden_dim, vocab_size)
 
 
+    
     def forward_step(
         self,
         features,
         input_ids,
         hidden=None,
         cell=None,
-        feature_keys=None
+        feature_keys=None,
+        return_attention=False
     ):
 
         if hidden is None or cell is None:
@@ -99,7 +100,7 @@ class LSTMDecoder(nn.Module):
             self.embedding(input_ids)
         )
 
-        context, _ = self.attention(
+        context, attention_weights = self.attention(
             features,
             hidden[-1],
             feature_keys=feature_keys
@@ -121,7 +122,11 @@ class LSTMDecoder(nn.Module):
 
         logits = self.output(hidden_representation)
 
+        if return_attention:
+            return logits, hidden, cell, feature_keys, attention_weights
+
         return logits, hidden, cell, feature_keys
+
 
     def forward(self, features, input_ids):
 
