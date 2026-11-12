@@ -84,6 +84,7 @@ def main():
 
     best_val, start_ep = float("inf"), 1
     drive_dir = next((Path(p) / "captioning/checkpoints" / f"{enc}_{dec}" for p in ("/content/drive/MyDrive", "/content/gdrive/MyDrive") if os.path.exists(p)), None)
+    # drive_dir = next((Path(p) / "captioning/checkpoints" / f"{enc}_{dec}_full" for p in ("/content/drive/MyDrive", "/content/gdrive/MyDrive") if os.path.exists(p)), None)
     best_ckpt = ckpt_dir / "best.pt"
 
     if not args.debug and not best_ckpt.exists() and drive_dir and (drive_dir / "best.pt").exists():
