@@ -16,19 +16,6 @@ from src.data.text_preprocess import (
 
 
 class Flickr30kDataset(Dataset):
-    """
-    Dataset Flickr30k cho Image Captioning.
-
-    Mỗi phần tử trả về:
-        image_features:    Tensor (num_regions, feature_dim)
-        decoder_input_ids: Tensor (max_len - 1,)
-        target_ids:        Tensor (max_len - 1,)
-        attention_mask:    Tensor (max_len - 1,)
-        loss_mask:         Tensor (max_len - 1,)
-
-    Kích thước image_features được xác định từ feature thực tế
-    hoặc expected_feature_shape truyền vào khi khởi tạo.
-    """
 
     def __init__(
         self,
