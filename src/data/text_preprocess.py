@@ -20,14 +20,6 @@ SPECIAL_TOKEN_ID = 50256
 
 @lru_cache(maxsize=1)
 def load_gpt2_tokenizer():
-    """
-    Load GPT-2 BPE tokenizer.
-
-    BOS, EOS and PAD use the same token:
-    <|endoftext|>, ID 50256.
-
-    No new token is added to GPT-2 vocabulary.
-    """
 
     tokenizer = GPT2Tokenizer.from_pretrained(TOKENIZER_NAME)
 
@@ -54,15 +46,6 @@ def load_gpt2_tokenizer():
 
 
 def clean_caption(text):
-    """
-    Light cleaning for Flickr30k captions.
-
-    - Decode HTML entities.
-    - Remove invalid control characters.
-    - Normalize whitespace.
-    - Preserve English capitalization and punctuation.
-    - Do not perform word-level tokenization.
-    """
 
     if not isinstance(text, str):
         return ""
@@ -81,16 +64,6 @@ def clean_caption(text):
 
 
 def load_captions(csv_path):
-    """
-    Read Flickr30k results.csv.
-
-    Return DataFrame with:
-        image_name
-        comment
-
-    Empty captions and exact duplicate image-caption pairs
-    are removed.
-    """
 
     csv_path = Path(csv_path)
 
