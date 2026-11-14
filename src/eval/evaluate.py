@@ -16,7 +16,6 @@ import argparse
 import csv
 import json
 import random
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -173,20 +172,6 @@ def _load_feature(path: Path, expected_shape: tuple[int, int]) -> torch.Tensor:
     return torch.from_numpy(array.astype(np.float32, copy=False))
 
 
-def _distinct_scores(captions: list[str]) -> tuple[float, float]:
-    """Corpus Distinct-1/2 over lowercased word and punctuation tokens."""
-    tokens = [re.findall(r"\w+|[^\w\s]", caption.lower()) for caption in captions]
-    unigrams = [token for sentence in tokens for token in sentence]
-    bigrams = [
-        (sentence[index], sentence[index + 1])
-        for sentence in tokens
-        for index in range(len(sentence) - 1)
-    ]
-    distinct_1 = len(set(unigrams)) / len(unigrams) if unigrams else 0.0
-    distinct_2 = len(set(bigrams)) / len(bigrams) if bigrams else 0.0
-    return distinct_1, distinct_2
-
-
 def _caption_metrics(
     image_names: list[str],
     references: dict[str, list[str]],
@@ -194,8 +179,10 @@ def _caption_metrics(
 ) -> dict[str, float]:
     try:
         from pycocoevalcap.bleu.bleu import Bleu
+        from pycocoevalcap.cider.cider import Cider
         from pycocoevalcap.meteor.meteor import Meteor
         from pycocoevalcap.rouge.rouge import Rouge
+        from pycocoevalcap.spice.spice import Spice
     except ImportError as error:
         raise RuntimeError(
             "Thiếu pycocoevalcap; cài thư viện bằng `pip install -r requirements.txt`."
@@ -212,14 +199,15 @@ def _caption_metrics(
         if close is not None:
             close()
     rouge_score, _ = Rouge().compute_score(gts, res)
-    distinct_1, distinct_2 = _distinct_scores(predictions)
+    cider_score, _ = Cider().compute_score(gts, res)
+    spice_score, _ = Spice().compute_score(gts, res)
 
     return {
         **{f"BLEU-{index + 1}": float(score) for index, score in enumerate(bleu_scores)},
         "METEOR": float(meteor_score),
         "ROUGE-L": float(rouge_score),
-        "Distinct-1": distinct_1,
-        "Distinct-2": distinct_2,
+        "CIDEr": float(cider_score),
+        "SPICE": float(spice_score),
     }
 
 
@@ -395,9 +383,8 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
         print(
             f"{row['model']:24s} {row['method']:13s} {row['group']:8s} "
             f"BLEU-4={row['BLEU-4']:.4f} METEOR={row['METEOR']:.4f} "
-            f"ROUGE-L={row['ROUGE-L']:.4f} "
-            f"Distinct-1={row['Distinct-1']:.4f} "
-            f"Distinct-2={row['Distinct-2']:.4f}"
+            f"ROUGE-L={row['ROUGE-L']:.4f} CIDEr={row['CIDEr']:.4f} "
+            f"SPICE={row['SPICE']:.4f}"
         )
     return rows, metrics_path
 
