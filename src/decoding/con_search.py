@@ -6,13 +6,6 @@ from src.data.text_preprocess import SPECIAL_TOKEN_ID, decode_caption
 
 
 def _get_gpt2_visual_attention(outputs, prefix_len, batch_index=0):
-    """
-    Extract visual attention from GPT-2.
-
-    Average attention across all Transformer layers and heads.
-    Keep only attention from the last text token to visual prefix tokens.
-    Normalize the visual attention to sum to 1.
-    """
 
     if outputs.attentions is None:
         raise RuntimeError(
@@ -42,12 +35,6 @@ def _gpt2_forward(
     prefix,
     return_attention=False
 ):
-    """
-    Full-sequence forward for GPT-2 Decoder.
-
-    This implementation intentionally does not modify GPT2Decoder.
-    It directly uses the existing img_proj and gpt2 modules.
-    """
 
     batch_size = input_ids.size(0)
     prefix_len = prefix.size(1)
@@ -105,26 +92,6 @@ def contrastive_search(
     alpha=0.6,
     return_attention=False
 ):
-    """
-    Contrastive Search supporting:
-
-    1. LSTM Decoder with forward_step() and Additive Attention.
-    2. GPT-2 Decoder with Visual Prefix Conditioning.
-
-    Args:
-        model: LSTMDecoder or GPT2Decoder.
-        features: (49, feature_dim) or (1, 49, feature_dim).
-        max_len: Maximum generated caption length.
-        top_k: Number of candidate tokens.
-        alpha: Degeneration penalty coefficient.
-        return_attention: Return Attention History.
-
-    Returns:
-        caption
-
-        Or:
-        (caption, attention_history)
-    """
 
     if not 0.0 <= alpha <= 1.0:
         raise ValueError(
@@ -265,7 +232,7 @@ def contrastive_search(
                 ).values
 
                 scores = (
-                    candidate_probs.squeeze(0)
+                    (1 - alpha) * candidate_probs.squeeze(0)
                     - alpha * degeneration_penalty
                 )
 
@@ -418,7 +385,7 @@ def contrastive_search(
                 ).values
 
                 scores = (
-                    candidate_probs.squeeze(0)
+                    (1 - alpha) * candidate_probs.squeeze(0)
                     - alpha * degeneration_penalty
                 )
 
