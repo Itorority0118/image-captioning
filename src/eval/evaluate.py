@@ -1,15 +1,3 @@
-"""Evaluate Flickr30k image-captioning checkpoints with beam search.
-
-Example:
-    python -m src.eval.evaluate \
-        --csv_path data/results.csv \
-        --features_root outputs/features \
-        --checkpoint efficientnet_b0_gpt2=/path/to/efficientnet_best.pt
-
-Repeat ``--checkpoint MODEL=PATH`` for checkpoints that are not in the
-standard ``<checkpoint_root>/<model>/best.pt`` locations.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -131,7 +119,6 @@ def _select_images(
     sample_size: int,
     seed: int,
 ) -> list[str]:
-    # Dùng giao của đủ bốn encoder để mọi mô hình được chấm trên cùng ảnh.
     common = []
     for image_name in test_names:
         stem = Path(image_name).stem
