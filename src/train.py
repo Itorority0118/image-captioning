@@ -14,7 +14,7 @@ from src.data.text_preprocess import GPT2_VOCAB_SIZE
 
 
 def forward_loss(model, batch, device):
-    feat = F.dropout(batch["image_features"].to(device, non_blocking=True), 0.2, model.training)
+    feat = F.dropout(batch["image_features"].to(device, non_blocking=True), 0.15, model.training)
     inp = batch["decoder_input_ids"].to(device, non_blocking=True)
     mask = batch["attention_mask"].to(device, non_blocking=True)
     targets = batch["target_ids"].to(device, non_blocking=True).masked_fill(
@@ -25,7 +25,7 @@ def forward_loss(model, batch, device):
         logits = logits[0] if isinstance(logits, tuple) else logits
         return F.cross_entropy(
             logits.reshape(-1, logits.size(-1)), targets.reshape(-1),
-            ignore_index=-100, label_smoothing=(0.1 if model.training else 0.0)
+            ignore_index=-100, label_smoothing=(0.05 if model.training else 0.0)
         )
 
 
@@ -44,14 +44,13 @@ def main():
     enc = args.encoder or cfg.get("encoder", "efficientnet_b0")
     dec = args.decoder or cfg.get("decoder", "gpt2")
     max_len = int(cfg.get("max_len", 40))
-    bs = 8 if args.debug else (args.batch_size or int(cfg.get("batch_size", 64)))
-    lr = args.lr or float(cfg.get("learning_rate", 3e-4))
-    epochs = 2 if args.debug else (args.epochs or int(cfg.get("epochs", 10)))
+    bs = 8 if args.debug else (args.batch_size or int(cfg.get("batch_size", 128)))
+    lr = args.lr or float(cfg.get("learning_rate", 5e-4))
+    epochs = 2 if args.debug else (args.epochs or int(cfg.get("epochs", 8)))
 
     seed = int(cfg.get("seed", 42))
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.backends.cudnn.benchmark = (device.type == "cuda")
 
     splits = args.splits or ("configs/splits_sample.json" if args.debug and os.path.exists("configs/splits_sample.json") else "configs/splits.json")
     csv_path = args.csv_path or str(DATA_PATH / "results.csv")
@@ -62,7 +61,8 @@ def main():
     if args.debug:
         train_ds, val_ds = Subset(train_ds, range(min(32, len(train_ds)))), Subset(val_ds, range(min(32, len(val_ds))))
 
-    kw = {"num_workers": 2, "pin_memory": True} if device.type == "cuda" and not args.debug else {}
+    num_workers = 4 if device.type == "cuda" and not args.debug else 0
+    kw = {"num_workers": num_workers, "pin_memory": True, "persistent_workers": num_workers > 0} if device.type == "cuda" and not args.debug else {}
     train_loader = DataLoader(train_ds, batch_size=bs, shuffle=True, **kw)
     val_loader = DataLoader(val_ds, batch_size=bs * 2, shuffle=False, **kw)
 
@@ -72,33 +72,35 @@ def main():
     else:
         model = GPT2Decoder(shape[1]).to(device)
         for n, param in model.gpt2.transformer.named_parameters():
-            param.requires_grad = any(k in n for k in ("h.10.", "h.11.", "ln_f"))
+            param.requires_grad = any(k in n for k in ("h.9.", "h.10.", "h.11.", "ln_f"))
 
     gpt2_p = [p for n, p in model.named_parameters() if p.requires_grad and "gpt2." in n]
     proj_p = [p for n, p in model.named_parameters() if p.requires_grad and "gpt2." not in n]
     params = proj_p + gpt2_p
-    print(f"Thiết bị: {device} | Mô hình: {enc}_{dec} | Train: {len(train_ds)} | Tham số học: {sum(p.numel() for p in params):,}")
+    print(f"Thiết bị: {device} | Mô hình: {enc}_{dec} | Train: {len(train_ds)} | BS: {bs} | Tham số học: {sum(p.numel() for p in params):,}")
 
-    opt = torch.optim.AdamW([{"params": proj_p, "lr": lr}, {"params": gpt2_p, "lr": lr * 0.1}], weight_decay=0.05)
+    opt = torch.optim.AdamW([{"params": proj_p, "lr": lr}, {"params": gpt2_p, "lr": lr * 0.25}], weight_decay=0.05)
     scaler = torch.amp.GradScaler(device.type, enabled=(device.type == "cuda"))
 
     best_val, start_ep = float("inf"), 1
     drive_dir = next((Path(p) / "captioning/checkpoints" / f"{enc}_{dec}" for p in ("/content/drive/MyDrive", "/content/gdrive/MyDrive") if os.path.exists(p)), None)
-    # drive_dir = next((Path(p) / "captioning/checkpoints" / f"{enc}_{dec}_full" for p in ("/content/drive/MyDrive", "/content/gdrive/MyDrive") if os.path.exists(p)), None)
     best_ckpt = ckpt_dir / "best.pt"
+    resume_from = best_ckpt if best_ckpt.exists() else (drive_dir / "best.pt" if drive_dir and (drive_dir / "best.pt").exists() else None)
 
-    if not args.debug and not best_ckpt.exists() and drive_dir and (drive_dir / "best.pt").exists():
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(drive_dir / "best.pt", best_ckpt)
-
-    if not args.debug and best_ckpt.exists():
-        ckpt = torch.load(best_ckpt, map_location=device, weights_only=False)
-        if ckpt.get("encoder") == enc and ckpt.get("decoder") == dec:
+    ckpt = None
+    if not args.debug and resume_from:
+        loaded = torch.load(resume_from, map_location=device, weights_only=False)
+        if loaded.get("encoder") == enc and loaded.get("decoder") == dec:
+            ckpt = loaded
             model.load_state_dict(ckpt["model_state_dict"])
+            if "opt_state_dict" in ckpt:
+                opt.load_state_dict(ckpt["opt_state_dict"])
             start_ep, best_val = ckpt["epoch"] + 1, ckpt.get("best_val", float("inf"))
-            print(f"Khôi phục {best_ckpt} (Epoch {ckpt['epoch']}, Best Val: {best_val:.4f})")
+            print(f"Khôi phục {resume_from} (Epoch {ckpt['epoch']}, Best Val: {best_val:.4f})")
 
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs - start_ep + 1) * len(train_loader), eta_min=1e-6)
+    if ckpt and "sched_state_dict" in ckpt:
+        sched.load_state_dict(ckpt["sched_state_dict"])
 
     for ep in range(start_ep, epochs + 1):
         model.train()
@@ -111,7 +113,7 @@ def main():
             torch.nn.utils.clip_grad_norm_(params, 1.0)
             scaler.step(opt); scaler.update(); sched.step()
             t_loss += loss.item()
-            if step % 200 == 0 or (args.debug and step == len(train_loader)):
+            if step % 500 == 0 or (args.debug and step == len(train_loader)):
                 print(f"  [Epoch {ep}/{epochs}] Step {step}/{len(train_loader)} | Loss: {loss.item():.4f}", flush=True)
 
         model.eval()
@@ -122,7 +124,11 @@ def main():
         print(f"=> Epoch {ep}/{epochs} ({time.time() - t0:.1f}s) | Train: {avg_t:.4f} | Val: {avg_v:.4f}")
 
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        state = {"epoch": ep, "encoder": enc, "decoder": dec, "model_state_dict": model.state_dict(), "val_loss": avg_v, "best_val": min(best_val, avg_v)}
+        state = {
+            "epoch": ep, "encoder": enc, "decoder": dec,
+            "model_state_dict": model.state_dict(), "opt_state_dict": opt.state_dict(), "sched_state_dict": sched.state_dict(),
+            "val_loss": avg_v, "best_val": min(best_val, avg_v),
+        }
         torch.save(state, ckpt_dir / "last.pt")
 
         if avg_v < best_val:
