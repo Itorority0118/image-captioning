@@ -13,6 +13,7 @@ from typing import List, Optional
 import torch
 
 from src.data.text_preprocess import decode_caption, load_gpt2_tokenizer
+from src.decoding import next_token_logits
 
 
 @dataclass
@@ -79,22 +80,8 @@ def _diverse_search_one(
                     device=features.device,
                 )
                 beam_features = features.expand(len(active_beams), -1, -1)
-                logits = model(beam_features, input_ids)
-                if isinstance(logits, tuple):
-                    logits = logits[0]
-
-                if (
-                    not isinstance(logits, torch.Tensor)
-                    or logits.ndim != 3
-                    or logits.shape[:2] != input_ids.shape
-                    or logits.shape[-1] == 0
-                ):
-                    raise ValueError(
-                        "Decoder phải trả logits có shape "
-                        "(batch, sequence_length, vocab_size)"
-                    )
-
-                log_probs = torch.log_softmax(logits[:, -1, :].float(), dim=-1)
+                logits = next_token_logits(model, beam_features, input_ids)
+                log_probs = torch.log_softmax(logits.float(), dim=-1)
                 vocab_size = log_probs.shape[-1]
 
                 # Phạt token mà các nhóm trước vừa chọn tại cùng bước.

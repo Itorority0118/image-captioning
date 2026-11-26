@@ -1,4 +1,4 @@
-"""Evaluate Flickr30k image-captioning checkpoints with beam search.
+"""Evaluate Flickr30k image captioning checkpoints with four search methods.
 
 Example:
     python -m src.eval.evaluate \
@@ -15,9 +15,14 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import random
+import re
+import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Mapping
 
@@ -26,7 +31,9 @@ import torch
 
 from src.data.text_preprocess import GPT2_VOCAB_SIZE, load_captions, load_gpt2_tokenizer
 from src.decoding.beam import beam_search
+from src.decoding.con_search import contrastive_search
 from src.decoding.diverse_beam import diverse_beam_search
+from src.decoding.greedy import greedy_decode
 from src.models.decoder_gpt2 import GPT2Decoder
 from src.models.encoders import EXPECTED_SHAPES
 from src.paths import DATA_PATH, WORK_PATH
@@ -46,6 +53,7 @@ MODEL_SPECS = (
     ModelSpec("deit_tiny_gpt2", "deit_tiny", "gpt2"),
 )
 MODEL_NAMES = {spec.name for spec in MODEL_SPECS}
+REPORT_SCORES = ("BLEU-1", "BLEU-4", "METEOR", "ROUGE-L", "CIDEr", "SPICE")
 
 
 def _parse_checkpoint_override(value: str) -> tuple[str, Path]:
@@ -73,7 +81,7 @@ def _load_checkpoint(
     if not path.is_file():
         raise FileNotFoundError(f"Không tìm thấy checkpoint {spec.name}: {path}")
 
-    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(checkpoint, Mapping):
         raise ValueError(f"Checkpoint {path} không chứa dictionary hợp lệ")
 
@@ -96,7 +104,9 @@ def _load_checkpoint(
     model.load_state_dict(state_dict, strict=True)
     model.eval()
     return model, {
-        "checkpoint": str(path),
+        "checkpoint": str(path.resolve()),
+        "checkpoint_bytes": path.stat().st_size,
+        "checkpoint_mtime_ns": path.stat().st_mtime_ns,
         "epoch": checkpoint.get("epoch"),
         "val_loss": checkpoint.get("val_loss"),
         "best_val": checkpoint.get("best_val"),
@@ -172,6 +182,57 @@ def _load_feature(path: Path, expected_shape: tuple[int, int]) -> torch.Tensor:
     return torch.from_numpy(array.astype(np.float32, copy=False))
 
 
+@lru_cache(maxsize=1)
+def _java_major_version() -> int:
+    version = subprocess.run(
+        ["java", "-version"], capture_output=True, text=True, timeout=15, check=True
+    )
+    match = re.search(r'version "(?:1\.)?(\d+)', version.stderr + version.stdout)
+    if not match:
+        raise RuntimeError(f"Could not determine Java version: {version.stderr}")
+    return int(match[1])
+
+
+def _spice_score(scorer, gts, res) -> float:
+    if _java_major_version() < 15:
+        return float(scorer.compute_score(gts, res)[0])
+
+    # Use the original SPICE scorer and write its JSON without Nashorn.
+    from pycocoevalcap.spice import spice
+
+    spice_dir = Path(spice.__file__).resolve().parent
+    launcher = Path(__file__).with_name("SpiceJson.java").resolve()
+    entries = [
+        {"image_id": key, "test": res[key][0], "refs": gts[key]}
+        for key in gts
+    ]
+    with tempfile.TemporaryDirectory(prefix="caption-spice-") as folder:
+        input_path = Path(folder) / "input.json"
+        output_path = Path(folder) / "output.json"
+        input_path.write_text(json.dumps(entries), encoding="utf-8")
+        cache_dir = spice_dir / "cache"
+        cache_dir.mkdir(exist_ok=True)
+        packages = (
+            "java.lang", "java.math", "java.util", "java.util.concurrent",
+            "java.io", "java.net", "java.text", "java.time", "java.lang.reflect",
+        )
+        subprocess.run(
+            [
+                "java", "-Xmx4G",
+                *(f"--add-opens=java.base/{package}=ALL-UNNAMED" for package in packages),
+                "-cp", os.pathsep.join((spice.SPICE_JAR, "lib/*")),
+                str(launcher), str(output_path), str(input_path),
+                "-cache", str(cache_dir), "-subset", "-silent",
+            ],
+            cwd=spice_dir,
+            check=True,
+        )
+        results = json.loads(output_path.read_text(encoding="utf-8"))
+    if len(results) != len(entries):
+        raise ValueError(f"SPICE returned {len(results)} rows for {len(entries)} images")
+    return float(np.mean([scorer.float_convert(row["scores"]["All"]["f"]) for row in results]))
+
+
 def _caption_metrics(
     image_names: list[str],
     references: dict[str, list[str]],
@@ -188,6 +249,8 @@ def _caption_metrics(
             "Thiếu pycocoevalcap; cài thư viện bằng `pip install -r requirements.txt`."
         ) from error
 
+    if len(predictions) != len(image_names):
+        raise ValueError("One generated caption is required for each test image")
     gts = {str(i): references[name] for i, name in enumerate(image_names)}
     res = {str(i): [caption] for i, caption in enumerate(predictions)}
     bleu_scores, _ = Bleu(4).compute_score(gts, res)
@@ -200,7 +263,7 @@ def _caption_metrics(
             close()
     rouge_score, _ = Rouge().compute_score(gts, res)
     cider_score, _ = Cider().compute_score(gts, res)
-    spice_score, _ = Spice().compute_score(gts, res)
+    spice_score = _spice_score(Spice(), gts, res)
 
     return {
         **{f"BLEU-{index + 1}": float(score) for index, score in enumerate(bleu_scores)},
@@ -222,12 +285,46 @@ def _resolve_checkpoint_paths(
     return paths
 
 
+def _write_tables(output_dir: Path, rows: list[dict], diverse_groups: int) -> Path:
+    metrics_path = output_dir / "metrics.csv"
+    report_fields = [
+        "model", "method", "group", "test_images", "checkpoint_epoch", *REPORT_SCORES,
+    ]
+    comparison = []
+    groups_by_model: dict[str, list[dict]] = {}
+    for row in rows:
+        if row["method"] != "diverse_beam":
+            comparison.append(row)
+            continue
+        groups = groups_by_model.setdefault(row["model"], [])
+        groups.append(row)
+        if len(groups) == diverse_groups:
+            comparison.append({
+                **row,
+                "group": "mean_all_groups",
+                **{key: float(np.mean([group[key] for group in groups])) for key in REPORT_SCORES},
+            })
+    for path, fields, data in (
+        (metrics_path, list(rows[0]), rows),
+        (output_dir / "comparison_6_scores.csv", report_fields, comparison),
+    ):
+        temp_path = path.with_suffix(".tmp")
+        with temp_path.open("w", newline="", encoding="utf-8-sig") as file:
+            writer = csv.DictWriter(file, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(data)
+        temp_path.replace(path)
+    return metrics_path
+
+
 def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
     csv_path = Path(args.csv_path).expanduser()
     split_path = Path(args.splits).expanduser()
     features_root = Path(args.features_root).expanduser()
     checkpoint_root = Path(args.checkpoint_root).expanduser()
     output_dir = Path(args.output_dir).expanduser()
+    if args.reuse_captions_from and args.reuse_captions_from.resolve() == output_dir.resolve():
+        raise ValueError("Reused captions and evaluation output must use different directories")
 
     if args.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -244,6 +341,7 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
     checkpoint_paths = _resolve_checkpoint_paths(
         checkpoint_root, args.checkpoint
     )
+    _java_major_version()
 
     print(
         f"Thiết bị: {device} | Ảnh đánh giá: {len(image_names)} "
@@ -253,6 +351,7 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
     )
 
     rows: list[dict] = []
+    output_dir.mkdir(parents=True, exist_ok=True)
     for spec in MODEL_SPECS:
         model, checkpoint_info = _load_checkpoint(
             checkpoint_paths[spec.name], spec, device
@@ -264,15 +363,57 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
         )
 
         beam_predictions: list[str] = []
+        greedy_predictions: list[str] = []
+        contrastive_predictions: list[str] = []
+        greedy_seconds = contrastive_seconds = 0.0
         diverse_predictions: list[list[str]] = [
             [] for _ in range(args.diverse_groups)
         ]
         beam_seconds = 0.0
         diverse_seconds = 0.0
 
-        for index, image_name in enumerate(image_names, start=1):
+        caption_path = output_dir / f"{spec.name}_captions.csv"
+        groups = [f"diverse_beam_{i + 1}" for i in range(args.diverse_groups)]
+        columns = ["image", "references", "greedy", "beam", "contrastive", *groups]
+        reused: list[dict[str, str]] = []
+        if args.reuse_captions_from:
+            source = Path(args.reuse_captions_from) / caption_path.name
+            if source.is_file():
+                with source.open(newline="", encoding="utf-8-sig") as file:
+                    reader = csv.DictReader(file)
+                    if reader.fieldnames != columns:
+                        raise ValueError(f"Unexpected caption columns in {source}")
+                    reused = list(reader)
+                if [row["image"] for row in reused] != image_names[:len(reused)] or any(
+                    any(row[column] is None for column in columns)
+                    or row["references"].splitlines() != references[row["image"]]
+                    for row in reused
+                ):
+                    raise ValueError(f"Captions in {source} do not match this evaluation split")
+                for row in reused:
+                    greedy_predictions.append(row["greedy"])
+                    beam_predictions.append(row["beam"])
+                    contrastive_predictions.append(row["contrastive"])
+                    for group, name in zip(diverse_predictions, groups):
+                        group.append(row[name])
+                print(f"Reused {len(reused)} captions from {source}", flush=True)
+
+        with caption_path.open("w", newline="", encoding="utf-8-sig") as file:
+            writer = csv.DictWriter(file, fieldnames=columns)
+            writer.writeheader()
+            writer.writerows(reused)
+
+        for index, image_name in enumerate(image_names[len(reused):], start=len(reused) + 1):
             feature_path = features_root / spec.encoder / f"{Path(image_name).stem}.npy"
             feature = _load_feature(feature_path, EXPECTED_SHAPES[spec.encoder])
+
+            start = time.perf_counter()
+            greedy_predictions.append(greedy_decode(model, feature, max_len=args.max_len))
+            greedy_seconds += time.perf_counter() - start
+
+            start = time.perf_counter()
+            contrastive_predictions.append(contrastive_search(model, feature, max_len=args.max_len))
+            contrastive_seconds += time.perf_counter() - start
 
             start = time.perf_counter()
             beam_caption = beam_search(
@@ -301,13 +442,27 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
             for group_index, caption in enumerate(group_captions):
                 diverse_predictions[group_index].append(caption)
 
+            with caption_path.open("a", newline="", encoding="utf-8") as file:
+                writer = csv.writer(file)
+                writer.writerow([image_name, "\n".join(references[image_name]),
+                                 greedy_predictions[-1], beam_caption,
+                                 contrastive_predictions[-1], *group_captions])
+
             if index % 10 == 0 or index == len(image_names):
                 print(
                     f"  {index}/{len(image_names)} ảnh đã xử lý",
                     flush=True,
                 )
 
-        metric_sets = [("beam", "", beam_predictions, beam_seconds)]
+        del model
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        metric_sets = [
+            ("greedy", "", greedy_predictions, greedy_seconds),
+            ("beam", "", beam_predictions, beam_seconds),
+            ("contrastive", "", contrastive_predictions, contrastive_seconds),
+        ]
         metric_sets.extend(
             (
                 "diverse_beam",
@@ -318,6 +473,7 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
             for group_index, predictions in enumerate(diverse_predictions)
         )
         for method, group, predictions, elapsed_seconds in metric_sets:
+            print(f"  Chấm {method} {group}".rstrip(), flush=True)
             scores = _caption_metrics(image_names, references, predictions)
             row = {
                 "model": spec.name,
@@ -328,10 +484,11 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
                 "test_images": len(image_names),
                 "checkpoint_epoch": checkpoint_info["epoch"],
                 "checkpoint_val_loss": checkpoint_info["val_loss"],
-                "seconds": elapsed_seconds,
+                "seconds": None if reused else elapsed_seconds,
                 **scores,
             }
             rows.append(row)
+            metrics_path = _write_tables(output_dir, rows, args.diverse_groups)
 
         prediction_data = {
             "model": spec.name,
@@ -349,6 +506,8 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
                 {
                     "image_name": image_name,
                     "references": references[image_name],
+                    "greedy_search": greedy_predictions[index],
+                    "contrastive_search": contrastive_predictions[index],
                     "beam_search": beam_predictions[index],
                     "diverse_beam_search": [
                         group[index] for group in diverse_predictions
@@ -365,18 +524,6 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
         )
         print(f"Đã lưu dự đoán: {prediction_path}", flush=True)
 
-        del model
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    metrics_path = output_dir / "metrics.csv"
-    fieldnames = list(rows[0])
-    with metrics_path.open("w", newline="", encoding="utf-8-sig") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
     print(f"\nĐã lưu bảng chỉ số: {metrics_path}", flush=True)
     print("\nKết quả:")
     for row in rows:
@@ -391,7 +538,7 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Đánh giá bốn mô hình Flickr30k bằng Beam Search và Diverse Beam Search."
+        description="Đánh giá bốn mô hình Flickr30k với bốn thuật toán sinh caption."
     )
     parser.add_argument("--csv_path", default=str(DATA_PATH / "results.csv"))
     parser.add_argument("--splits", default="configs/splits.json")
@@ -399,7 +546,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint_root", default=str(WORK_PATH / "checkpoints"))
     parser.add_argument("--checkpoint", action="append", type=_parse_checkpoint_override, default=[])
     parser.add_argument("--output_dir", default=str(WORK_PATH / "evaluation"))
-    parser.add_argument("--sample_size", type=int, default=100,
+    parser.add_argument(
+        "--reuse_captions_from", type=Path,
+        help="Reuse captions from a run with the same checkpoints and decoding settings.",
+    )
+    parser.add_argument("--sample_size", type=int, default=1000,
                         help="Số ảnh chọn từ test split; 0 dùng toàn bộ test set.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")

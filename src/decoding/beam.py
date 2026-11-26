@@ -5,6 +5,7 @@ import math
 import torch
 
 from src.data.text_preprocess import decode_caption, load_gpt2_tokenizer
+from src.decoding import next_token_logits
 
 
 def _beam_score(beam, length_penalty):
@@ -31,21 +32,8 @@ def _beam_search_one(model, features, tokenizer, beam_size, max_len, length_pena
             device=features.device,
         )
         beam_features = features.expand(len(active_beams), -1, -1)
-        logits = model(beam_features, input_ids)
-        if isinstance(logits, tuple):
-            logits = logits[0]
-        if (
-            not isinstance(logits, torch.Tensor)
-            or logits.ndim != 3
-            or logits.shape[:2] != input_ids.shape
-            or logits.shape[-1] == 0
-        ):
-            raise ValueError(
-                "Decoder phải trả logits có shape (batch, sequence_length, vocab_size)"
-            )
-
-        # Cộng log xác suất để tránh nhân nhiều xác suất rất nhỏ.
-        log_probs = torch.log_softmax(logits[:, -1, :].float(), dim=-1)
+        logits = next_token_logits(model, beam_features, input_ids)
+        log_probs = torch.log_softmax(logits.float(), dim=-1)
         previous_scores = log_probs.new_tensor([beam[1] for beam in active_beams])
         candidate_scores = previous_scores.unsqueeze(1) + log_probs
         top_scores, top_indices = torch.topk(

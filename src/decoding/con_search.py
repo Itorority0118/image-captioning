@@ -5,6 +5,34 @@ import torch.nn.functional as F
 from src.data.text_preprocess import SPECIAL_TOKEN_ID, decode_caption
 
 
+def _gpt2_contrastive_search(model, features, max_len, top_k, alpha):
+    device = next(model.parameters()).device
+    features = features.reshape(1, *features.shape[-2:]).to(device, dtype=torch.float32)
+    prefix = model.img_proj(features)
+    tokens = torch.tensor([[SPECIAL_TOKEN_ID]], device=device)
+    transformer = model.gpt2.transformer
+
+    def score(ids):
+        embeddings = torch.cat(
+            (prefix.expand(ids.size(0), -1, -1), transformer.wte(ids)), dim=1
+        )
+        return transformer(inputs_embeds=embeddings, use_cache=False).last_hidden_state[:, prefix.size(1):]
+
+    history = score(tokens)
+    for _ in range(max_len - 1):
+        probabilities = model.gpt2.lm_head(history[:, -1]).float().softmax(-1)
+        probs, ids = probabilities[0].topk(min(top_k, probabilities.size(-1)))
+        candidates = torch.cat((tokens.expand(ids.numel(), -1), ids[:, None]), dim=1)
+        states = score(candidates)
+        penalty = F.cosine_similarity(states[:, -1, None], history, dim=-1).amax(-1)
+        best = ((1 - alpha) * probs - alpha * penalty).argmax().item()
+        if ids[best].item() == SPECIAL_TOKEN_ID:
+            break
+        tokens = candidates[best:best + 1]
+        history = states[best:best + 1]
+    return decode_caption(tokens[0])
+
+
 @torch.no_grad()
 def contrastive_search(
     model,
@@ -15,7 +43,7 @@ def contrastive_search(
     return_attention=False
 ):
 
-    if not hasattr(model, "forward_step"):
+    if not hasattr(model, "forward_step") and not hasattr(model, "gpt2"):
         raise AttributeError(
             "Model must implement forward_step()."
         )
@@ -33,6 +61,11 @@ def contrastive_search(
     model.eval()
 
     try:
+        if hasattr(model, "gpt2"):
+            if return_attention:
+                raise ValueError("GPT-2 contrastive search does not return attention.")
+            return _gpt2_contrastive_search(model, features, max_len, top_k, alpha)
+
         device = next(model.parameters()).device
 
         if features.dim() == 2:
@@ -141,9 +174,8 @@ def contrastive_search(
 
             degeneration_penalty = similarity.max(dim=1).values
 
-            # Original Contrastive Search scoring
             scores = (
-                candidate_probs.squeeze(0)
+                (1 - alpha) * candidate_probs.squeeze(0)
                 - alpha * degeneration_penalty
             )
 
