@@ -1,10 +1,3 @@
-"""Sinh nhiều caption có tính đa dạng bằng Diverse Beam Search.
-
-Diverse Beam Search chia beam thành nhiều nhóm. Từng nhóm được giải mã
-tuần tự; token đã được các nhóm trước chọn ở cùng bước bị trừ điểm để
-khuyến khích các nhóm tạo ra caption khác nhau.
-"""
-
 import math
 from collections import Counter
 from dataclasses import dataclass
@@ -22,12 +15,10 @@ class _Beam:
     log_probability: float
     search_score: float
     finished: bool
-    # Token được sinh ở bước hiện tại; None với beam đã kết thúc từ trước.
     last_token: Optional[int] = None
 
 
 def _normalized_score(beam, length_penalty):
-    """Chuẩn hóa điểm theo độ dài, không tính BOS nhưng tính EOS."""
     length = max(1, len(beam.token_ids) - 1)
     penalty = ((5.0 + length) / 6.0) ** length_penalty
     return beam.search_score / penalty
@@ -53,14 +44,12 @@ def _diverse_search_one(
         if all(beam.finished for group in groups for beam in group):
             break
 
-        # Chỉ đếm token được sinh ở bước này bởi các nhóm đứng trước.
         previous_group_tokens = Counter()
         next_groups = []
 
         for group in groups:
             active_beams = [beam for beam in group if not beam.finished]
 
-            # Beam đã kết thúc được giữ nguyên, không sinh thêm token.
             candidates = [
                 _Beam(
                     beam.token_ids,
@@ -151,7 +140,6 @@ def _diverse_search_one(
 
         groups = next_groups
 
-    # Trả caption có điểm cao nhất của mỗi nhóm để giữ tính đa dạng giữa nhóm.
     return [
         decode_caption(
             max(group, key=lambda beam: _normalized_score(beam, length_penalty)).token_ids,
@@ -172,24 +160,6 @@ def diverse_beam_search(
     max_len=40,
     length_penalty=1.0,
 ):
-    """Sinh các caption đa dạng bằng Grouped Diverse Beam Search.
-
-    Args:
-        model: Decoder nhận ``model(features, input_ids)`` và trả logits.
-        features: Tensor ``(regions, feature_dim)`` cho một ảnh hoặc
-            ``(batch, regions, feature_dim)`` cho nhiều ảnh.
-        tokenizer: Tokenizer GPT-2; tự nạp tokenizer của dự án nếu bỏ qua.
-        beam_size: Tổng số beam, phải chia hết cho ``num_groups``.
-        num_groups: Số nhóm beam. Kết quả có một caption tốt nhất mỗi nhóm.
-        diversity_strength: Mức phạt cho token được nhóm trước chọn ở cùng
-            bước; đặt 0 để tắt phạt đa dạng.
-        max_len: Số token tối đa, tính cả BOS và EOS nếu có.
-        length_penalty: Số mũ của hệ số ``((5 + length) / 6)`` khi xếp hạng.
-
-    Returns:
-        Với một ảnh, trả ``list[str]`` gồm một caption cho mỗi nhóm.
-        Với batch ảnh, trả ``list[list[str]]`` theo thứ tự ảnh.
-    """
     for name, value in (("beam_size", beam_size), ("num_groups", num_groups)):
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise ValueError(f"{name} phải là số nguyên >= 1")
@@ -270,6 +240,5 @@ def diverse_beam_search(
     return captions[0] if single_image else captions
 
 
-# Tên ngắn và tên tương ứng với greedy_decode/beam_decode trong cùng thư mục.
 diverse_search = diverse_beam_search
 diverse_beam_decode = diverse_beam_search

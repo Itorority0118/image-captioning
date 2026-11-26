@@ -10,7 +10,7 @@ Dataset: Flickr30k.
 | `mobilenetv3_lstm` | MobileNetV3-Small | LSTM + Attention |
 | `efficientnet_b0_gpt2` | EfficientNet-B0 | GPT-2 |
 | `deit_tiny_gpt2` | DeiT-Tiny | GPT-2 |
-| `tinyclip_gpt2` | TinyCLIP | GPT-2 |
+| `tinyclip_gpt2` | TinyCLIP (ViT-40M/32) | GPT-2 |
 
 ---
 
@@ -96,60 +96,50 @@ Khi code trên GitHub có cập nhật mới, mở lại notebook và chạy `!g
 
 Dataset Flickr30k **không nằm trong repo** (quá nặng).
 
-- Tải dataset tại: https://www.kaggle.com/datasets/hsankesara/flickr-image-dataset (cần đăng nhập Kaggle)
-- **Máy cá nhân:** giải nén vào thư mục `data/` ở gốc dự án.
-- **Colab:** nên dùng một file zip duy nhất rồi giải nén vào ổ đĩa Colab. Mỗi phiên mới chạy ô này:
-
-```
-from google.colab import drive
-drive.mount('/content/drive')
-!cp /content/drive/MyDrive/captioning/flickr30k_clean.zip /content/
-!mkdir -p /content/data
-!unzip -q /content/flickr30k_clean.zip -d /content/data
-!rm /content/flickr30k_clean.zip
-```
-
-Sau đó ảnh nằm ở `/content/data/flickr30k_images` và caption ở `/content/data/results.csv`.
+- Link dataset: https://www.kaggle.com/datasets/hsankesara/flickr-image-dataset (tải tay thì cần đăng nhập Kaggle)
+- **Máy cá nhân:** không cần cả bộ, chỉ cần bộ ảnh nhỏ để thử code (xem phần "Bộ ảnh nhỏ" bên dưới).
+- **Colab:** không cần tải tay hay chép file qua Drive. Ô lệnh dưới đây tự tải dataset từ Kaggle về ổ đĩa Colab (nhanh hơn nhiều so với đọc ảnh từ Drive):
 
 ```
 !pip install -q kagglehub
 import kagglehub
 path = kagglehub.dataset_download("hsankesara/flickr-image-dataset")
-!cd "{path}/flickr30k_images" && zip -r -0 -q /content/flickr30k_clean.zip results.csv flickr30k_images -x "flickr30k_images/flickr30k_images/*" -x "flickr30k_images/results.csv"
+```
+
+Biến `path` giữ vị trí dataset. Ảnh nằm ở `{path}/flickr30k_images/flickr30k_images`, caption ở `{path}/flickr30k_images/results.csv`. (Dataset trên Kaggle bị đóng gói hai bản ảnh lồng nhau, nên đường dẫn có hai tầng `flickr30k_images`.)
+
+Lưu ý: `{path}` chỉ có giá trị khi dòng `path = ...` đã chạy trong cùng phiên, nên luôn chạy cả ô từ trên xuống dưới.
+
+### Lưu feature và checkpoint lên Google Drive (Colab, không bắt buộc)
+
+Feature và mô hình đã train **mất khi đóng phiên Colab**. Feature trích lại chỉ mất vài phút, nhưng checkpoint đã train thì nên cất sang Drive **của chính mình**. Đừng chép thẳng thư mục feature (hàng chục nghìn file nhỏ, Drive xử lý rất chậm), hãy nén thành một file zip. Thay `ENCODER` bằng tên encoder của bạn:
+
+```
 from google.colab import drive
 drive.mount('/content/drive')
 !mkdir -p /content/drive/MyDrive/captioning
-!cp /content/flickr30k_clean.zip /content/drive/MyDrive/captioning/
-```
-
-(Bộ dữ liệu trên Kaggle bị đóng gói hai bản ảnh, lệnh trên chỉ nén một bản nên file chỉ khoảng 4,2 GB.)
-```
-
-### Lưu feature và checkpoint lên Google Drive (Colab)
-
-Feature ảnh và mô hình đã train **mất khi đóng phiên Colab**, nên sau khi tạo xong phải chép sang Google Drive **của chính mình** (đã mount Drive như trên). Mỗi người chỉ lưu feature và checkpoint của mô hình mình phụ trách
-
-```
-!mkdir -p /content/drive/MyDrive/captioning
-!cp -r /content/work/features /content/drive/MyDrive/captioning/
+!cd /content/work/features && zip -r -0 -q /content/features_ENCODER.zip ENCODER
+!cp /content/features_ENCODER.zip /content/drive/MyDrive/captioning/
 !cp -r /content/work/checkpoints /content/drive/MyDrive/captioning/
 ```
 
 Phiên mới muốn dùng lại:
 
 ```
-!mkdir -p /content/work
-!cp -r /content/drive/MyDrive/captioning/features /content/work/
+from google.colab import drive
+drive.mount('/content/drive')
+!mkdir -p /content/work/features
+!cp /content/drive/MyDrive/captioning/features_ENCODER.zip /content/
+!unzip -q /content/features_ENCODER.zip -d /content/work/features
 !cp -r /content/drive/MyDrive/captioning/checkpoints /content/work/
 ```
 
----
 ### Bộ ảnh nhỏ để test code trên máy cá nhân
 
 Không cần giữ cả dataset trên máy. Chỉ cần vài trăm ảnh để chạy thử code:
 
 1. Tải dataset đầy đủ về máy một lần (link ở trên) và giải nén ra một thư mục tạm.
-2. Mở `src/data/make_sample.py`, sửa 3 dòng đầu (`CSV_PATH`, `IMAGE_DIR`, `NUM_IMAGES`) cho đúng đường dẫn trên máy
+2. Mở `src/data/make_sample.py`, sửa 3 dòng đầu (`CSV_PATH`, `IMAGE_DIR`, `NUM_IMAGES`) cho đúng đường dẫn trên máy.
 3. Chạy lệnh:
 
 ```
@@ -157,6 +147,8 @@ python src/data/make_sample.py
 ```
 
 Script lấy ngẫu nhiên 300 ảnh (seed 42, nên cả nhóm ra cùng một bộ) và chép vào thư mục `data/`.
+
+---
 
 ## C2. Cấu trúc thư mục
 
@@ -189,22 +181,6 @@ image-captioning/
 ├── .gitignore                Danh sách file/thư mục không đưa lên GitHub
 └── README.md                 File hướng dẫn này
 ```
-
-## C3. Chạy tiền xử lý ảnh
-
-`configs/splits.json` đã có sẵn trong repo (31.783 ảnh: 30.783 train, 1.000 val, 1.000 test, chia theo tên ảnh, seed 42), không cần chạy lại.
-
-Trích feature (từ thư mục gốc dự án, nhớ có `-m` và không có `.py`):
-
-```
-# Thử nhanh trên bộ ảnh nhỏ ở máy cá nhân
-python -m src.data.image_features --encoder deit_tiny --splits configs/splits_sample.json
-
-# Chạy toàn bộ trên Colab (ảnh đã giải nén ở /content/data)
-!python -m src.data.image_features --encoder deit_tiny --image_dir /content/data/flickr30k_images
-```
-
-`--encoder` chọn một trong: `mobilenetv3`, `efficientnet_b0`, `deit_tiny`, `tinyclip`. Ảnh nào đã có file feature thì được bỏ qua, nên Colab bị ngắt thì chạy lại đúng lệnh cũ là làm tiếp.
 
 Các thư mục dưới đây **không nằm trên GitHub** (vì quá nặng):
 
@@ -252,7 +228,36 @@ Decoder **không được ghi cứng số vị trí** (49, 197, 50): phải đ�
 | Thành viên 3 | `src/models/decoder_gpt2.py`, `src/decoding/greedy.py`, `src/train.py`, `configs/` | `efficientnet_b0_gpt2` |
 | Thành viên 4 | `src/eval/`, `src/decoding/beam.py`, `notebooks/` | `deit_tiny_gpt2` |
 
-Quy tắc: **chỉ sửa file thuộc phần mình phụ trách**. Cần sửa file của người khác thì nhắn người đó.
+Quy tắc: **chỉ sửa file thuộc phần mình phụ trách**. Cần sửa file của người khác thì nhắn người đó.
+
+---
+
+## C3. Chạy tiền xử lý ảnh
+
+`configs/splits.json` đã có sẵn trong repo (31.783 ảnh: 30.783 train, 1.000 val, 1.000 test, chia theo tên ảnh, seed 42), không cần chạy lại.
+
+`--encoder` chọn một trong: `mobilenetv3`, `efficientnet_b0`, `deit_tiny`, `tinyclip`. Ảnh nào đã có file feature thì được bỏ qua, nên Colab bị ngắt thì chạy lại đúng lệnh cũ là làm tiếp.
+
+**Thử nhanh trên máy cá nhân** (bộ ảnh nhỏ, chạy trong terminal ở thư mục gốc dự án, nhớ có `-m` và không có `.py`):
+
+```
+python -m src.data.image_features --encoder deit_tiny --splits configs/splits_sample.json
+```
+
+**Chạy toàn bộ trên Colab** (bật GPU trước, chạy cả ô từ trên xuống dưới, đổi `ENCODER` cho đúng):
+
+```
+!pip install -q kagglehub timm transformers
+import kagglehub
+path = kagglehub.dataset_download("hsankesara/flickr-image-dataset")
+%cd /content
+!rm -rf image-captioning
+!git clone https://github.com/Itorority0118/image-captioning.git
+%cd image-captioning
+!python -m src.data.image_features --encoder ENCODER --image_dir "{path}/flickr30k_images/flickr30k_images"
+```
+
+Nếu code chưa được merge vào `main`, thêm `-b tên-nhánh` sau chữ `clone`. Kết quả đúng: dòng đầu có `Thiết bị: cuda` và `Số ảnh trong danh sách: 31783`, dòng cuối có `OK`. Feature nằm ở `/content/work/features/ENCODER/`.
 
 ---
 
@@ -260,17 +265,18 @@ Quy tắc: **chỉ sửa file thuộc phần mình phụ trách**. Cần sửa f
 
 Quy tắc chung (dùng cách nào cũng phải theo):
 
+- Mỗi người làm trên **một nhánh riêng của mình** (đặt tên theo mã số và tên, ví dụ `23130388_MaNguyenVu`). Mọi việc của mình đều commit vào nhánh đó, không tạo nhánh theo từng việc.
 - Không commit thẳng vào nhánh `main`.
 - Viết xong thì mở Pull Request, chờ duyệt rồi mới merge.
 - Không đưa mật khẩu, token hay API key vào code (repo này công khai).
 
 ### Cách 1: dùng GitHub Desktop
 
-1. Tạo nhánh: **Current branch → New branch**, đặt tên, ví dụ `feat/image-pipeline`.
+1. Tạo nhánh của bạn một lần duy nhất: **Current branch → New branch**, đặt tên theo mã số và tên của bạn. Các lần sau làm tiếp trên nhánh đó.
 2. Viết code trong VS Code.
-3. Quay lại GitHub Desktop: ghi mô tả ở ô Summary → **Commit** → **Publish branch** → **Create Pull Request**.
+3. Quay lại GitHub Desktop: ghi mô tả ở ô Summary → **Commit** → **Publish branch** (lần đầu) hoặc **Push origin** (các lần sau) → **Create Pull Request** khi cần gộp vào `main`.
 4. Chờ duyệt và merge.
-5. Lấy code mới nhất: chọn nhánh `main` → bấm **Fetch origin** → **Pull origin**.
+5. Lấy code mới nhất của `main`: chọn nhánh `main` → bấm **Fetch origin** → **Pull origin**, rồi quay lại nhánh của bạn.
 
 ### Cách 2: dùng Git (gõ lệnh)
 
@@ -279,19 +285,19 @@ Quy tắc chung (dùng cách nào cũng phải theo):
        git checkout main
        git pull
 
-2. Tạo nhánh mới và chuyển sang nhánh đó (đổi tên nhánh cho phù hợp):
+2. Tạo nhánh của bạn một lần duy nhất (đổi thành mã số và tên của bạn). Các lần sau chỉ cần `git checkout <tên nhánh>`:
 
-       git checkout -b feat/image-pipeline
+       git checkout -b 23130388_MaNguyenVu
 
 3. Viết code trong VS Code. Xong thì lưu lại và đẩy lên GitHub:
 
        git status
        git add .
        git commit -m "mo ta ngan gon viec da lam"
-       git push -u origin feat/image-pipeline
+       git push -u origin 23130388_MaNguyenVu
 
 4. Mở trang repo trên github.com, bấm nút **Compare & pull request** → **Create pull request**.
-5. Chờ duyệt và merge. Sau đó quay về nhánh chính:
+5. Chờ duyệt và merge. Sau đó quay về nhánh chính để lấy code mới:
 
        git checkout main
        git pull

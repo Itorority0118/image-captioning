@@ -52,6 +52,7 @@ MODEL_SPECS = (
     ModelSpec("tinyclip_gpt2", "tinyclip", "gpt2"),
     ModelSpec("deit_tiny_gpt2", "deit_tiny", "gpt2"),
 )
+METHODS = ("greedy", "beam", "contrastive", "diverse_beam")
 MODEL_NAMES = {spec.name for spec in MODEL_SPECS}
 REPORT_SCORES = ("BLEU-1", "BLEU-4", "METEOR", "ROUGE-L", "CIDEr", "SPICE")
 
@@ -140,6 +141,7 @@ def _select_images(
     features_root: Path,
     sample_size: int,
     seed: int,
+    specs=MODEL_SPECS,
 ) -> list[str]:
     # Dùng giao của đủ bốn encoder để mọi mô hình được chấm trên cùng ảnh.
     common = []
@@ -147,7 +149,7 @@ def _select_images(
         stem = Path(image_name).stem
         if all(
             (features_root / spec.encoder / f"{stem}.npy").is_file()
-            for spec in MODEL_SPECS
+            for spec in specs
         ):
             common.append(image_name)
 
@@ -237,13 +239,13 @@ def _caption_metrics(
     image_names: list[str],
     references: dict[str, list[str]],
     predictions: list[str],
-) -> dict[str, float]:
+    *, skip_spice=False, ptb_tokenize=False,
+) -> dict[str, float | None]:
     try:
         from pycocoevalcap.bleu.bleu import Bleu
         from pycocoevalcap.cider.cider import Cider
         from pycocoevalcap.meteor.meteor import Meteor
         from pycocoevalcap.rouge.rouge import Rouge
-        from pycocoevalcap.spice.spice import Spice
     except ImportError as error:
         raise RuntimeError(
             "Thiếu pycocoevalcap; cài thư viện bằng `pip install -r requirements.txt`."
@@ -253,6 +255,12 @@ def _caption_metrics(
         raise ValueError("One generated caption is required for each test image")
     gts = {str(i): references[name] for i, name in enumerate(image_names)}
     res = {str(i): [caption] for i, caption in enumerate(predictions)}
+    if ptb_tokenize:
+        from pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer
+
+        tokenizer = PTBTokenizer()
+        gts = tokenizer.tokenize({key: [{"caption": text} for text in captions] for key, captions in gts.items()})
+        res = tokenizer.tokenize({key: [{"caption": captions[0] or "."}] for key, captions in res.items()})
     bleu_scores, _ = Bleu(4).compute_score(gts, res)
     meteor_scorer = Meteor()
     try:
@@ -263,14 +271,18 @@ def _caption_metrics(
             close()
     rouge_score, _ = Rouge().compute_score(gts, res)
     cider_score, _ = Cider().compute_score(gts, res)
-    spice_score = _spice_score(Spice(), gts, res)
+    spice_score = None
+    if not skip_spice:
+        from pycocoevalcap.spice.spice import Spice
+
+        spice_score = _spice_score(Spice(), gts, res)
 
     return {
         **{f"BLEU-{index + 1}": float(score) for index, score in enumerate(bleu_scores)},
         "METEOR": float(meteor_score),
         "ROUGE-L": float(rouge_score),
         "CIDEr": float(cider_score),
-        "SPICE": float(spice_score),
+        "SPICE": spice_score,
     }
 
 
@@ -285,8 +297,8 @@ def _resolve_checkpoint_paths(
     return paths
 
 
-def _write_tables(output_dir: Path, rows: list[dict], diverse_groups: int) -> Path:
-    metrics_path = output_dir / "metrics.csv"
+def _write_tables(output_dir: Path, rows: list[dict], diverse_groups: int, suffix: str = "") -> Path:
+    metrics_path = output_dir / f"metrics{suffix}.csv"
     report_fields = [
         "model", "method", "group", "test_images", "checkpoint_epoch", *REPORT_SCORES,
     ]
@@ -302,11 +314,11 @@ def _write_tables(output_dir: Path, rows: list[dict], diverse_groups: int) -> Pa
             comparison.append({
                 **row,
                 "group": "mean_all_groups",
-                **{key: float(np.mean([group[key] for group in groups])) for key in REPORT_SCORES},
+                **{key: None if row[key] is None else float(np.mean([group[key] for group in groups])) for key in REPORT_SCORES},
             })
     for path, fields, data in (
         (metrics_path, list(rows[0]), rows),
-        (output_dir / "comparison_6_scores.csv", report_fields, comparison),
+        (output_dir / f"comparison_6_scores{suffix}.csv", report_fields, comparison),
     ):
         temp_path = path.with_suffix(".tmp")
         with temp_path.open("w", newline="", encoding="utf-8-sig") as file:
@@ -333,9 +345,16 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
         if device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("Đã chọn CUDA nhưng runtime không có GPU khả dụng")
 
+    specs = [spec for spec in MODEL_SPECS if spec.name in args.models]
+    methods = set(args.methods)
+    suffix = "" if len(specs) == len(MODEL_SPECS) else "_" + "+".join(spec.name for spec in specs)
+    if methods != set(METHODS):
+        suffix += "_" + "+".join(method for method in METHODS if method in methods)
+    if args.reuse_captions_from and methods != set(METHODS):
+        raise ValueError("Caption reuse requires all four search methods")
     test_names, references = _load_references(csv_path, split_path)
     image_names = _select_images(
-        test_names, features_root, args.sample_size, args.seed
+        test_names, features_root, args.sample_size, args.seed, specs
     )
     tokenizer = load_gpt2_tokenizer()
     checkpoint_paths = _resolve_checkpoint_paths(
@@ -352,7 +371,7 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
 
     rows: list[dict] = []
     output_dir.mkdir(parents=True, exist_ok=True)
-    for spec in MODEL_SPECS:
+    for spec in specs:
         model, checkpoint_info = _load_checkpoint(
             checkpoint_paths[spec.name], spec, device
         )
@@ -407,46 +426,52 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
             feature_path = features_root / spec.encoder / f"{Path(image_name).stem}.npy"
             feature = _load_feature(feature_path, EXPECTED_SHAPES[spec.encoder])
 
-            start = time.perf_counter()
-            greedy_predictions.append(greedy_decode(model, feature, max_len=args.max_len))
-            greedy_seconds += time.perf_counter() - start
+            beam_caption = ""
+            group_captions = [""] * len(groups)
+            if "greedy" in methods:
+                start = time.perf_counter()
+                greedy_predictions.append(greedy_decode(model, feature, max_len=args.max_len))
+                greedy_seconds += time.perf_counter() - start
 
-            start = time.perf_counter()
-            contrastive_predictions.append(contrastive_search(model, feature, max_len=args.max_len))
-            contrastive_seconds += time.perf_counter() - start
+            if "contrastive" in methods:
+                start = time.perf_counter()
+                contrastive_predictions.append(contrastive_search(model, feature, max_len=args.max_len, top_k=args.contrastive_top_k, alpha=args.contrastive_alpha))
+                contrastive_seconds += time.perf_counter() - start
 
-            start = time.perf_counter()
-            beam_caption = beam_search(
-                model,
-                feature,
-                tokenizer=tokenizer,
-                beam_size=args.beam_size,
-                max_len=args.max_len,
-                length_penalty=args.length_penalty,
-            )
-            beam_seconds += time.perf_counter() - start
-            beam_predictions.append(beam_caption)
+            if "beam" in methods:
+                start = time.perf_counter()
+                beam_caption = beam_search(
+                    model,
+                    feature,
+                    tokenizer=tokenizer,
+                    beam_size=args.beam_size,
+                    max_len=args.max_len,
+                    length_penalty=args.length_penalty,
+                )
+                beam_seconds += time.perf_counter() - start
+                beam_predictions.append(beam_caption)
 
-            start = time.perf_counter()
-            group_captions = diverse_beam_search(
-                model,
-                feature,
-                tokenizer=tokenizer,
-                beam_size=args.diverse_beam_size,
-                num_groups=args.diverse_groups,
-                diversity_strength=args.diversity_strength,
-                max_len=args.max_len,
-                length_penalty=args.length_penalty,
-            )
-            diverse_seconds += time.perf_counter() - start
-            for group_index, caption in enumerate(group_captions):
-                diverse_predictions[group_index].append(caption)
+            if "diverse_beam" in methods:
+                start = time.perf_counter()
+                group_captions = diverse_beam_search(
+                    model,
+                    feature,
+                    tokenizer=tokenizer,
+                    beam_size=args.diverse_beam_size,
+                    num_groups=args.diverse_groups,
+                    diversity_strength=args.diversity_strength,
+                    max_len=args.max_len,
+                    length_penalty=args.length_penalty,
+                )
+                diverse_seconds += time.perf_counter() - start
+                for group_index, caption in enumerate(group_captions):
+                    diverse_predictions[group_index].append(caption)
 
             with caption_path.open("a", newline="", encoding="utf-8") as file:
                 writer = csv.writer(file)
                 writer.writerow([image_name, "\n".join(references[image_name]),
-                                 greedy_predictions[-1], beam_caption,
-                                 contrastive_predictions[-1], *group_captions])
+                                 greedy_predictions[-1] if greedy_predictions else "", beam_caption,
+                                 contrastive_predictions[-1] if contrastive_predictions else "", *group_captions])
 
             if index % 10 == 0 or index == len(image_names):
                 print(
@@ -473,8 +498,10 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
             for group_index, predictions in enumerate(diverse_predictions)
         )
         for method, group, predictions, elapsed_seconds in metric_sets:
+            if method not in methods:
+                continue
             print(f"  Chấm {method} {group}".rstrip(), flush=True)
-            scores = _caption_metrics(image_names, references, predictions)
+            scores = _caption_metrics(image_names, references, predictions, skip_spice=args.skip_spice, ptb_tokenize=args.ptb_tokenize)
             row = {
                 "model": spec.name,
                 "encoder": spec.encoder,
@@ -488,7 +515,7 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
                 **scores,
             }
             rows.append(row)
-            metrics_path = _write_tables(output_dir, rows, args.diverse_groups)
+            metrics_path = _write_tables(output_dir, rows, args.diverse_groups, suffix)
 
         prediction_data = {
             "model": spec.name,
@@ -506,12 +533,10 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
                 {
                     "image_name": image_name,
                     "references": references[image_name],
-                    "greedy_search": greedy_predictions[index],
-                    "contrastive_search": contrastive_predictions[index],
-                    "beam_search": beam_predictions[index],
-                    "diverse_beam_search": [
-                        group[index] for group in diverse_predictions
-                    ],
+                    "greedy_search": greedy_predictions[index] if greedy_predictions else None,
+                    "contrastive_search": contrastive_predictions[index] if contrastive_predictions else None,
+                    "beam_search": beam_predictions[index] if beam_predictions else None,
+                    "diverse_beam_search": [group[index] for group in diverse_predictions] if "diverse_beam" in methods else [],
                 }
                 for index, image_name in enumerate(image_names)
             ],
@@ -527,11 +552,12 @@ def evaluate(args: argparse.Namespace) -> tuple[list[dict], Path]:
     print(f"\nĐã lưu bảng chỉ số: {metrics_path}", flush=True)
     print("\nKết quả:")
     for row in rows:
+        spice = "skipped" if row["SPICE"] is None else f"{row['SPICE']:.4f}"
         print(
             f"{row['model']:24s} {row['method']:13s} {row['group']:8s} "
             f"BLEU-4={row['BLEU-4']:.4f} METEOR={row['METEOR']:.4f} "
             f"ROUGE-L={row['ROUGE-L']:.4f} CIDEr={row['CIDEr']:.4f} "
-            f"SPICE={row['SPICE']:.4f}"
+            f"SPICE={spice}"
         )
     return rows, metrics_path
 
@@ -552,6 +578,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--sample_size", type=int, default=1000,
                         help="Số ảnh chọn từ test split; 0 dùng toàn bộ test set.")
+    parser.add_argument("--models", nargs="+", choices=sorted(MODEL_NAMES), default=sorted(MODEL_NAMES))
+    parser.add_argument("--methods", nargs="+", choices=METHODS, default=METHODS)
+    parser.add_argument("--contrastive_top_k", type=int, default=5)
+    parser.add_argument("--contrastive_alpha", type=float, default=0.6)
+    parser.add_argument("--skip_spice", action="store_true")
+    parser.add_argument("--ptb_tokenize", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--beam_size", type=int, default=5)
