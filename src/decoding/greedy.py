@@ -1,5 +1,6 @@
 import torch
 from src.data.text_preprocess import SPECIAL_TOKEN_ID, decode_caption
+from src.decoding import next_token_logits
 
 
 @torch.no_grad()
@@ -10,8 +11,8 @@ def greedy_decode(model, features, max_len=40):
     input_ids = torch.tensor([[SPECIAL_TOKEN_ID]], device=device)
 
     for _ in range(max_len - 1):
-        logits = model(features, input_ids)
-        next_id = (logits[0] if isinstance(logits, tuple) else logits)[:, -1].argmax(-1, keepdim=True)
+        logits = next_token_logits(model, features, input_ids)
+        next_id = logits.argmax(-1, keepdim=True)
         if next_id.item() == SPECIAL_TOKEN_ID:
             break
         input_ids = torch.cat([input_ids, next_id], dim=1)

@@ -13,6 +13,12 @@ class GPT2Decoder(nn.Module):
             nn.Dropout(dropout)
         )
 
+    def next_token_logits(self, features, input_ids):
+        transformer = self.gpt2.transformer
+        embeds = torch.cat([self.img_proj(features), transformer.wte(input_ids)], dim=1)
+        hidden = transformer(inputs_embeds=embeds, use_cache=False).last_hidden_state
+        return self.gpt2.lm_head(hidden[:, -1, :])
+
     def forward(self, features, input_ids, attention_mask=None):
         embeds = torch.cat([self.img_proj(features), self.gpt2.transformer.wte(input_ids)], dim=1)
 
